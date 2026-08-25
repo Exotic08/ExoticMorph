@@ -20,7 +20,7 @@ QUY TẮC VÀNG:
 """
 
 from typing import List, Optional, Literal
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
 # LLM Strict Models: từ chối MỌI trường thừa (vd: LLM cố trả về x, y, width, height)
@@ -53,16 +53,33 @@ class ContentCard(BaseModel):
     )
     title: str = Field(
         ...,
-        min_length=1,
-        max_length=200,
-        description="Tiêu đề ngắn gọn của thẻ (1-12 từ, hiển thị in đậm, font lớn)",
+        min_length=3,
+        max_length=80,
+        description="Tiêu đề tự nhiên dài 3-6 từ, chứa thuật ngữ thực tế của chủ đề.",
     )
-    body: str = Field(
-        ...,
-        min_length=1,
-        max_length=800,
-        description="Nội dung chi tiết của thẻ (1-5 dòng, giải thích ý chính)",
+    description: str = Field(
+        ..., min_length=150, max_length=450,
+        description="Đoạn văn bắt buộc 30-50 từ, chứa dữ kiện hoặc ví dụ cụ thể.",
     )
+
+    @field_validator("title")
+    @classmethod
+    def title_word_count(cls, value: str) -> str:
+        if not 3 <= len(value.split()) <= 6:
+            raise ValueError("title phải gồm 3-6 từ")
+        return value
+
+    @field_validator("description")
+    @classmethod
+    def description_word_count(cls, value: str) -> str:
+        if not 30 <= len(value.split()) <= 50:
+            raise ValueError("description phải gồm 30-50 từ")
+        return value
+
+    @property
+    def body(self) -> str:
+        """Tương thích ngược với Layout Engine; dữ liệu chuẩn là description."""
+        return self.description
     color_theme: str = Field(
         ...,
         min_length=4,

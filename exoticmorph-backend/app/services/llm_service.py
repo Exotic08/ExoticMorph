@@ -47,130 +47,27 @@ T = TypeVar("T")
 # FEW-SHOT EXAMPLES — DẠNG ABSTRACT (KHÔNG CHỨA NỘI DUNG CỤ THỂ)
 # ==============================================================================
 # QUAN TRỌNG: Các ví dụ này CHỈ dùng để minh hoẠ CẤU TRÚC JSON.
-# Nội dung (topic, title, body) được viết dạng placeholder [VÍ DỤ] rõ ràng
+# Nội dung (topic, title, description) được viết dạng placeholder [VÍ DỤ] rõ ràng
 # để LLM KHÔNG copy nội dung vào output thực tế. Đây là fix chính cho
 # lỗi Few-Shot Contamination (ví dụ: "Hệ Mặt Trời" cứ lặp lại).
 
-_FEW_SHOT_EXAMPLE_1 = json.dumps(
-    {
-        "topic": "[TÊN CHỦ ĐỀ NGẮN GỌN - VÍ DỤ MINH HOẠ]",
-        "slides": [
-            {
-                "slide_number": 1,
-                "slide_title": "[TIÊU ĐỀ SLIDE 1 - BÁM SÁT CHỦ ĐỀ NGƯỜI DÙNG]",
-                "cards": [
-                    {
-                        "morph_id": "hero_card",
-                        "title": "[TIÊU ĐỀ THẺ CHÍNH 1]",
-                        "body": "[NỘI DUNG CHI TIẾT 1-3 CÂU, BÁM CHẶT CHỦ ĐỀ - KHÔNG SAO CHÉP VÍ DỤ]",
-                        "color_theme": "#8B5CF6",
-                        "order": 0,
-                    },
-                    {
-                        "morph_id": "col_1",
-                        "title": "[TIÊU ĐỀ THẺ PHỤ 1]",
-                        "body": "[NỘI DUNG THẺ PHỤ - PHẢI LIÊN QUAN TRỰC TIẾP ĐẾN CHỦ ĐỀ]",
-                        "color_theme": "#161926",
-                        "order": 1,
-                    },
-                    {
-                        "morph_id": "col_2",
-                        "title": "[TIÊU ĐỀ THẺ PHỤ 2]",
-                        "body": "[NỘI DUNG THẺ PHỤ - DỮ LIỆU/VÍ DỤ CỤ THỂ]",
-                        "color_theme": "#1E2235",
-                        "order": 2,
-                    },
-                ],
-            },
-            {
-                "slide_number": 2,
-                "slide_title": "[TIÊU ĐỀ SLIDE 2 - ĐI SÂU VÀO CHI TIẾT]",
-                "cards": [
-                    {
-                        "morph_id": "hero_card",
-                        "title": "[CÙNG morph_id hero_card VỚI SLIDE 1 ĐỂ MORPH]",
-                        "body": "[NỘI DUNG CHI TIẾT HƠN VỀ CHỦ ĐỀ CHÍNH]",
-                        "color_theme": "#161926",
-                        "order": 0,
-                    },
-                    {
-                        "morph_id": "col_1",
-                        "title": "[CÙNG morph_id col_1 VỚI SLIDE 1]",
-                        "body": "[NỘI DUNG MỞ RỘNG CỦA THẺ NÀY]",
-                        "color_theme": "#06B6D4",
-                        "order": 1,
-                    },
-                    {
-                        "morph_id": "col_2",
-                        "title": "[CÙNG morph_id col_2 VỚI SLIDE 1]",
-                        "body": "[NỘI DUNG MỞ RỘNG CỦA THẺ NÀY]",
-                        "color_theme": "#EC4899",
-                        "order": 2,
-                    },
-                ],
-            },
-        ],
-    },
-    ensure_ascii=False,
-    indent=2,
-)
+_FEW_SHOT_EXAMPLE_1 = json.dumps({
+    "topic": "Hệ Mặt Trời",
+    "slides": [{
+        "slide_number": 1,
+        "slide_title": "Kiến trúc Hệ Mặt Trời",
+        "cards": [
+            {"morph_id": "sun", "title": "Mặt Trời chi phối quỹ đạo", "description": "Mặt Trời chứa khoảng 99,86 phần trăm khối lượng toàn hệ, chủ yếu là hydro và heli. Nhiệt độ lõi xấp xỉ 15 triệu độ C, nơi phản ứng nhiệt hạch biến hydro thành heli và phát ra năng lượng duy trì sự sống trên Trái Đất.", "color_theme": "#8B5CF6", "order": 0},
+            {"morph_id": "planets", "title": "Bốn hành tinh đá", "description": "Thủy, Kim, Trái Đất và Hỏa nằm ở vùng trong, có bề mặt rắn và mật độ lớn. Trái Đất nổi bật với nước lỏng, còn Sao Hỏa lưu giữ dấu vết lòng sông cổ, cung cấp manh mối về khí hậu từng ấm và ẩm hơn.", "color_theme": "#161926", "order": 1},
+            {"morph_id": "belt", "title": "Đai tiểu hành tinh giữa", "description": "Đai tiểu hành tinh nằm giữa Sao Hỏa và Sao Mộc, là phần còn sót lại của vật chất hình thành hành tinh nhưng không kết tụ được. Sao Mộc với khối lượng lớn đã khuấy nhiễu quỹ đạo, hạn chế quá trình tạo một hành tinh mới.", "color_theme": "#1E2235", "order": 2}
+        ]
+    }]
+}, ensure_ascii=False, indent=2)
 
-_FEW_SHOT_EXAMPLE_2 = json.dumps(
-    {
-        "topic": "[VÍ DỤ 2: TÊN CHỦ ĐỀ BẤT KỲ - KHÔNG SAO CHÉP]",
-        "slides": [
-            {
-                "slide_number": 1,
-                "slide_title": "[TIÊU ĐỀ MỞ ĐẦU - 1 CARD HERO]",
-                "cards": [
-                    {
-                        "morph_id": "main_msg",
-                        "title": "[TIÊU ĐỀ THÔNG ĐIỆP CHÍNH]",
-                        "body": "[NỘI DUNG MỞ RỘNG CHO THÔNG ĐIỆP, 1-3 CÂU]",
-                        "color_theme": "#2563EB",
-                        "order": 0,
-                    }
-                ],
-            },
-            {
-                "slide_number": 2,
-                "slide_title": "[TIÊU ĐỀ GIỚI THIỆU - 4 CARDS 2x2 HOẶC 4 CỘT]",
-                "cards": [
-                    {
-                        "morph_id": "feature_a",
-                        "title": "[ĐIỂM 1]",
-                        "body": "[MÔ TẢ ĐIỂM 1]",
-                        "color_theme": "#1E293B",
-                        "order": 0,
-                    },
-                    {
-                        "morph_id": "feature_b",
-                        "title": "[ĐIỂM 2]",
-                        "body": "[MÔ TẢ ĐIỂM 2]",
-                        "color_theme": "#1E293B",
-                        "order": 1,
-                    },
-                    {
-                        "morph_id": "feature_c",
-                        "title": "[ĐIỂM 3]",
-                        "body": "[MÔ TẢ ĐIỂM 3]",
-                        "color_theme": "#6366F1",
-                        "order": 2,
-                    },
-                    {
-                        "morph_id": "feature_d",
-                        "title": "[ĐIỂM 4]",
-                        "body": "[MÔ TẢ ĐIỂM 4]",
-                        "color_theme": "#1E293B",
-                        "order": 3,
-                    },
-                ],
-            },
-        ],
-    },
-    ensure_ascii=False,
-    indent=2,
-)
+_FEW_SHOT_EXAMPLE_2 = json.dumps({
+    "topic": "[CHỦ ĐỀ THỰC TẾ KHÁC DO NGƯỜI DÙNG CUNG CẤP]",
+    "slides": [{"slide_number": 1, "slide_title": "[KẾT LUẬN CỤ THỂ VỀ CHỦ ĐỀ]", "cards": [{"morph_id": "evidence", "title": "[THUẬT NGỮ CHUYÊN NGÀNH]", "description": "[30-50 từ: giải thích cơ chế hoặc luận điểm cụ thể, kèm một con số, mốc thời gian, ví dụ thực tế và ý nghĩa của dữ kiện đối với chủ đề người dùng yêu cầu.]", "color_theme": "#2563EB", "order": 0}]}]
+}, ensure_ascii=False, indent=2)
 
 
 # ==============================================================================
@@ -180,6 +77,14 @@ _FEW_SHOT_EXAMPLE_2 = json.dumps(
 # với Python format. Examples được gắn vào bằng .replace() ở cuối, an toàn 100%.
 
 SYSTEM_PROMPT_TEMPLATE = """Bạn là "Master Presentation Architect" — kiến trúc sư trình chiếu hàng đầu thế giới, chuyên thiết kế nội dung bài thuyết trình PowerPoint có hiệu ứng Morph.
+
+🚫 STRICT BAN LIST — TUYỆT ĐỐI KHÔNG DÙNG trong slide_title, title hoặc description:
+"Giới thiệu chủ đề", "Điểm nổi bật", "Cấu trúc bài", "Yếu tố cốt lõi", "Dữ liệu & Bằng chứng", "Giải pháp/Công nghệ", "Tác động chính", "Chỉ số đo lường" (kể cả biến thể viết hoa, dịch tương đương hoặc tiêu đề không nói rõ đối tượng).
+
+DEEP CONTENT RULES:
+- Mỗi card phải nói về một thực thể, cơ chế, sự kiện hoặc luận điểm cụ thể của USER TOPIC; không viết lời dẫn, mục lục hay placeholder.
+- title tự nhiên 3-6 từ và phải có từ khóa/thực thể của chủ đề. description đúng 30-50 từ, tối thiểu một dữ kiện định lượng, mốc thời gian, đơn vị, ví dụ hoặc quan hệ nhân quả. Không bịa số liệu: nếu chưa chắc, nêu rõ phạm vi/điều kiện hoặc dùng kiến thức nền đã biết.
+- Tự phát hiện ngôn ngữ của yêu cầu; nếu người dùng viết tiếng Việt, viết tiếng Việt tự nhiên, không dịch từng chữ từ tiếng Anh.
 
 ══════════════════════════════════════════════════════════════════════
 🚨 QUY TẮC QUAN TRỌNG NHẤT — TOPIC ADHERENCE (KHÔNG ĐƯỢC VI PHẠM) 🚨
@@ -193,7 +98,7 @@ SYSTEM_PROMPT_TEMPLATE = """Bạn là "Master Presentation Architect" — kiến
 3. **KHÔNG ĐƯỢC copy bất kỳ cụm từ / số liệu / tên sản phẩm / chủ đề nào
    từ ví dụ vào kết quả cuối cùng.** Ví dụ nói "[NỘI DUNG VÍ DỤ]", bạn phải
    thay bằng nội dung thật, liên quan trực tiếp đến USER TOPIC.
-4. Mỗi `title` và `body` phải chứa thông tin CHUYÊN BIỆT cho chủ đề người
+4. Mỗi `title` và `description` phải chứa thông tin CHUYÊN BIỆT cho chủ đề người
    dùng yêu cầu (số liệu cụ thể, thuật ngữ ngành, ví dụ liên quan trực tiếp),
    không phải những câu chung chung như "Giới thiệu tổng quan về sản phẩm"
    hay "Các điểm nổi bật của giải pháp" khi không nói rõ là gì.
@@ -213,7 +118,7 @@ CÁC QUY TẮC KHÁC (STRUCTURAL RULES)
 
 A. **CHỈ NỘI DUNG, KHÔNG HÌNH HỌC**:
    - KHÔNG trả về `x`, `y`, `width`, `height` ở bất kỳ đâu. Python sẽ tự tính.
-   - Bạn CHỈ quyết định: `title`, `body`, `color_theme`, `morph_id`, `order`.
+   - Bạn CHỈ quyết định: `title`, `description`, `color_theme`, `morph_id`, `order`.
 
 B. **BẢO TOÀN MORPH_ID (CHO HIỆU ỨNG MORPH POWERPOINT)**:
    - `morph_id` là mã định danh DUY NHẤT cho một đối tượng nội dung.
@@ -225,7 +130,7 @@ B. **BẢO TOÀN MORPH_ID (CHO HIỆU ỨNG MORPH POWERPOINT)**:
 
 C. **CẤU TRÚC MỖI SLIDE**:
    - Mỗi slide có: `slide_number` (tăng tuần tự từ 1), `slide_title`, `cards`.
-   - Mỗi card có: `morph_id`, `title` (ngắn 1-12 từ, in đậm), `body` (1-5 câu
+   - Mỗi card có: `morph_id`, `title` (ngắn 1-12 từ, in đậm), `description` (1-5 câu
      giải thích, CÓ NỘI DUNG CỤ THỂ), `color_theme` (mã hex vd "#1E2235"),
      `order` (thứ tự từ 0, tăng dần từ trái sang phải).
    - Mỗi slide có 1-4 cards.
@@ -241,7 +146,7 @@ E. **MÀU SẮC (theo phong cách)**:
    - Thẻ chính (điểm nhấn) dùng màu accent sáng; thẻ phụ dùng màu nền card tối.
    - Mọi `color_theme` phải là mã hex 6 ký tự có dấu #.
 
-F. **NGÔN NGỮ**: Toàn bộ nội dung (topic, slide_title, title, body) phải
+F. **NGÔN NGỮ**: Toàn bộ nội dung (topic, slide_title, title, description) phải
    bằng ngôn ngữ người dùng yêu cầu ("vi" → Tiếng Việt, "en" → English).
 
 G. **ĐỊNH DẠNG**: Trả về DUY NHẤT một JSON object hợp lệ. KHÔNG bọc trong
@@ -428,9 +333,9 @@ def _build_user_prompt(req: GenerateRequest) -> str:
         f"- Số lượng slide cần tạo (BẮT BUỘC đúng): {req.num_slides}\n"
         f"- Phong cách thiết kế: {req.style}\n"
         f"- Tỉ lệ khung hình: {req.aspect_ratio}\n"
-        f"- Ngôn ngữ nội dung (toàn bộ title/body phải dùng ngôn ngữ này): {lang}\n"
+        f"- Ngôn ngữ nội dung (toàn bộ title/description phải dùng ngôn ngữ này): {lang}\n"
         f"- Sinh speaker notes: {'Có' if req.include_speaker_notes else 'Không'}\n\n"
-        "HÃY NHỚ LẠI QUY TẮT SỐ 1: Mọi nội dung (topic, slide_title, title, body) "
+        "HÃY NHỚ LẠI QUY TẮT SỐ 1: Mọi nội dung (topic, slide_title, title, description) "
         "phải BÁM SÁT 100% chủ đề trong vùng === USER TOPIC TO GENERATE === ở trên. "
         "KHÔNG sao chép nội dung từ ví dụ, KHÔNG bịa nội dung chung chung. "
         "Trả về đúng JSON schema LLMOutput, không markdown fence, không giải thích."
@@ -471,7 +376,7 @@ def _content_smell_check(result: LLMOutput, original_prompt: str) -> None:
     for s in result.slides:
         combined += " " + (s.slide_title or "").lower()
         for c in s.cards:
-            combined += " " + (c.title or "").lower() + " " + (c.body or "").lower()
+            combined += " " + (c.title or "").lower() + " " + (c.description or "").lower()
     hits = [t for t in suspicious_tokens if t.lower() in combined]
     if hits:
         logger.warning(
@@ -672,22 +577,22 @@ def generate_fallback_presentation(req: GenerateRequest) -> PresentationResponse
         cards=[
             ContentCard(
                 morph_id="hero_card",
-                title=f"Giới Thiệu Chủ Đề",
-                body=f"Tổng quan về '{topic_title}': các vấn đề cốt lõi, bối cảnh và lý do chủ đề này quan trọng. Toàn bộ bài trình chiếu sẽ đi sâu vào các khía cạnh liên quan trực tiếp đến yêu cầu của bạn.",
+                title=f"Bối cảnh {topic_title}",
+                description=f"Tổng quan về '{topic_title}': các vấn đề cốt lõi, bối cảnh và lý do chủ đề này quan trọng. Toàn bộ bài trình chiếu sẽ đi sâu vào các khía cạnh liên quan trực tiếp đến yêu cầu của bạn.",
                 color_theme=accents[0],
                 order=0,
             ),
             ContentCard(
                 morph_id="col_1",
-                title="Điểm Nổi Bật",
-                body=f"Những khía cạnh/giá trị/lợi ích đáng chú ý nhất liên quan đến {topic_title}, được phân tích dựa trên góc nhìn chuyên ngành.",
+                title="Đặc điểm {topic_title}",
+                description=f"Những khía cạnh/giá trị/lợi ích đáng chú ý nhất liên quan đến {topic_title}, được phân tích dựa trên góc nhìn chuyên ngành.",
                 color_theme=accents[3],
                 order=1,
             ),
             ContentCard(
                 morph_id="col_2",
-                title="Cấu Trúc Bài",
-                body="Các slide tiếp theo sẽ lần lượt đi vào chi tiết: phân tích chuyên sâu, số liệu minh chứng và đề xuất giải pháp/kế hoạch hành động cụ thể.",
+                title="Các thành phần {topic_title}",
+                description="Các slide tiếp theo sẽ lần lượt đi vào chi tiết: phân tích chuyên sâu, số liệu minh chứng và đề xuất giải pháp/kế hoạch hành động cụ thể.",
                 color_theme=accents[3],
                 order=2,
             ),
@@ -701,22 +606,22 @@ def generate_fallback_presentation(req: GenerateRequest) -> PresentationResponse
             cards=[
                 ContentCard(
                     morph_id="hero_card",
-                    title="Yếu Tố Cốt Lõi",
-                    body=f"Đi sâu vào thành phần/nguyên nhân/yếu tố quan trọng nhất làm nên {topic_title}. Giải thích tại sao đây là điểm then chốt cần được ưu tiên hàng đầu.",
+                    title="Cơ chế {topic_title}",
+                    description=f"Đi sâu vào thành phần/nguyên nhân/yếu tố quan trọng nhất làm nên {topic_title}. Giải thích tại sao đây là điểm then chốt cần được ưu tiên hàng đầu.",
                     color_theme=accents[0],
                     order=0,
                 ),
                 ContentCard(
                     morph_id="col_1",
-                    title="Dữ Liệu & Bằng Chứng",
-                    body="Các số liệu, nghiên cứu điển hình hoặc thống kê thực tế liên quan trực tiếp đến chủ đề, giúp minh chứng cho luận điểm chính.",
+                    title="Số liệu {topic_title}",
+                    description="Các số liệu, nghiên cứu điển hình hoặc thống kê thực tế liên quan trực tiếp đến chủ đề, giúp minh chứng cho luận điểm chính.",
                     color_theme=accents[1],
                     order=1,
                 ),
                 ContentCard(
                     morph_id="col_2",
-                    title="Giải Pháp/Công Nghệ",
-                    body=f"Cách tiếp cận, công cụ hoặc phương pháp cụ thể có thể áp dụng để giải quyết vấn đề/khai thác cơ hội từ {topic_title}.",
+                    title="Cách tiếp cận {topic_title}",
+                    description=f"Cách tiếp cận, công cụ hoặc phương pháp cụ thể có thể áp dụng để giải quyết vấn đề/khai thác cơ hội từ {topic_title}.",
                     color_theme=accents[2],
                     order=2,
                 ),
@@ -730,15 +635,15 @@ def generate_fallback_presentation(req: GenerateRequest) -> PresentationResponse
             cards=[
                 ContentCard(
                     morph_id="hero_card",
-                    title="Tác Động Chính",
-                    body=f"Kết quả/lợi ích lớn nhất khi áp dụng thành công các giải pháp về {topic_title} — ảnh hưởng trực tiếp đến mục tiêu tổng thể.",
+                    title="Ảnh hưởng {topic_title}",
+                    description=f"Kết quả/lợi ích lớn nhất khi áp dụng thành công các giải pháp về {topic_title} — ảnh hưởng trực tiếp đến mục tiêu tổng thể.",
                     color_theme=accents[0],
                     order=0,
                 ),
                 ContentCard(
                     morph_id="kpi_roi",
-                    title="Chỉ Số Đo Lường",
-                    body="Các KPI cụ thể để theo dõi tiến độ và thành công, giúp đánh giá hiệu quả sau khi triển khai một cách khách quan.",
+                    title="Thước đo {topic_title}",
+                    description="Các KPI cụ thể để theo dõi tiến độ và thành công, giúp đánh giá hiệu quả sau khi triển khai một cách khách quan.",
                     color_theme=accents[4],
                     order=1,
                 ),
@@ -753,28 +658,28 @@ def generate_fallback_presentation(req: GenerateRequest) -> PresentationResponse
                 ContentCard(
                     morph_id="stage_1",
                     title="Giai Đoạn 1 — Chuẩn Bị",
-                    body="Khởi tạo, thu thập yêu cầu chi tiết, thiết kế kế hoạch và chuẩn bị nguồn lực cần thiết để bắt đầu.",
+                    description="Khởi tạo, thu thập yêu cầu chi tiết, thiết kế kế hoạch và chuẩn bị nguồn lực cần thiết để bắt đầu.",
                     color_theme=accents[0],
                     order=0,
                 ),
                 ContentCard(
                     morph_id="stage_2",
                     title="Giai Đoạn 2 — Thử Nghiệm",
-                    body="Triển khai thí điểm (MVP/Pilot), thu thập phản hồi và tinh chỉnh quy trình trước khi nhân rộng.",
+                    description="Triển khai thí điểm (MVP/Pilot), thu thập phản hồi và tinh chỉnh quy trình trước khi nhân rộng.",
                     color_theme=accents[3],
                     order=1,
                 ),
                 ContentCard(
                     morph_id="stage_3",
                     title="Giai Đoạn 3 — Mở Rộng",
-                    body="Triển khai trên quy mô lớn, tối ưu hiệu năng và tích hợp với các hệ thống liên quan.",
+                    description="Triển khai trên quy mô lớn, tối ưu hiệu năng và tích hợp với các hệ thống liên quan.",
                     color_theme=accents[3],
                     order=2,
                 ),
                 ContentCard(
                     morph_id="stage_4",
                     title="Giai Đoạn 4 — Vận Hành",
-                    body="Đưa vào vận hành ổn định, giám sát liên tục và cải tiến dựa trên dữ liệu thực tế.",
+                    description="Đưa vào vận hành ổn định, giám sát liên tục và cải tiến dựa trên dữ liệu thực tế.",
                     color_theme=accents[1],
                     order=3,
                 ),
@@ -789,7 +694,7 @@ def generate_fallback_presentation(req: GenerateRequest) -> PresentationResponse
                 ContentCard(
                     morph_id="hero_card",
                     title=f"Bắt Đầu Hành Trình",
-                    body=f"Tóm tắt lại thông điệp cốt lõi về {topic_title} và kêu gọi hành động cụ thể để đưa ý tưởng thành hiện thực. Hãy liên hệ để bắt đầu ngay hôm nay.",
+                    description=f"Tóm tắt lại thông điệp cốt lõi về {topic_title} và kêu gọi hành động cụ thể để đưa ý tưởng thành hiện thực. Hãy liên hệ để bắt đầu ngay hôm nay.",
                     color_theme=accents[0],
                     order=0,
                 ),
@@ -805,14 +710,14 @@ def generate_fallback_presentation(req: GenerateRequest) -> PresentationResponse
                     ContentCard(
                         morph_id=f"extra_{s_idx}_1",
                         title=f"Phân Tích Sâu #{s_idx - 5}A",
-                        body=f"Đào sâu khía cạnh/kịch bản/thách thức đặc thù liên quan trực tiếp đến {topic_title} chưa được đề cập ở các slide trước.",
+                        description=f"Đào sâu khía cạnh/kịch bản/thách thức đặc thù liên quan trực tiếp đến {topic_title} chưa được đề cập ở các slide trước.",
                         color_theme=accents[3],
                         order=0,
                     ),
                     ContentCard(
                         morph_id=f"extra_{s_idx}_2",
                         title=f"Phân Tích Sâu #{s_idx - 5}B",
-                        body=f"Đề xuất giải pháp chi tiết hoặc bài học kinh nghiệm rút ra cho khía cạnh được phân tích tại thẻ bên cạnh.",
+                        description=f"Đề xuất giải pháp chi tiết hoặc bài học kinh nghiệm rút ra cho khía cạnh được phân tích tại thẻ bên cạnh.",
                         color_theme=accents[4],
                         order=1,
                     ),
