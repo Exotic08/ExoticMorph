@@ -93,3 +93,19 @@ def set_shape_morph_id(shape: BaseShape, morph_id: str) -> str:
                 child.set("name", formatted_name)
                 break
     return formatted_name
+
+def get_shape_morph_id(shape: BaseShape) -> Optional[str]:
+    name = shape.name.strip()
+    if name.startswith("!!"):
+        return name[2:].strip()
+    return None
+
+def has_morph_transition(slide: Slide) -> bool:
+    slide_elem = slide._element
+    alt_content = slide_elem.find(f"{{{MC_NS}}}AlternateContent")
+    if alt_content is not None:
+        choice = alt_content.find(f"{{{MC_NS}}}Choice")
+        if choice is not None:
+            morph = choice.find(f".//{{{P16_NS}}}morph")
+            return morph is not None
+    return False
