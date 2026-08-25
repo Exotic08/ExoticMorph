@@ -1,11 +1,11 @@
 # ==============================================================================
-# STAGE 1: BUILDER (Cài đặt dependencies và biên dịch thư viện C/C++)
+# STAGE 1: BUILDER (Tạo virtualenv và biên dịch thư viện C/C++)
 # ==============================================================================
 FROM python:3.10-slim AS builder
 
 WORKDIR /build
 
-# Cài đặt các công cụ build hệ thống cần thiết cho lxml và Pillow
+# Cài đặt công cụ build hệ thống cần thiết cho lxml và Pillow
 RUN apt-get update && apt-get install -y --no-install-recommends \
     gcc \
     libxml2-dev \
@@ -14,24 +14,30 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libjpeg-dev \
     && rm -rf /var/lib/apt/lists/*
 
-# Copy file requirements và cài đặt packages
+# Tạo Virtual Environment độc lập tại /opt/venv
+RUN python -m venv /opt/venv
+ENV PATH="/opt/venv/bin:$PATH"
+
+# Cài đặt toàn bộ dependencies vào Virtual Environment
 COPY requirements.txt .
-RUN pip install --no-cache-dir --user -r requirements.txt
+RUN pip install --no-cache-dir --upgrade pip setuptools wheel && \
+    pip install --no-cache-dir -r requirements.txt
 
 # ==============================================================================
-# STAGE 2: PRODUCTION RUNNER (Image siêu nhẹ cho Render Deployment)
+# STAGE 2: PRODUCTION RUNNER (Image siêu nhẹ & an toàn cho Render)
 # ==============================================================================
 FROM python:3.10-slim AS runner
 
 WORKDIR /app
 
-# Thiết lập biến môi trường tối ưu hóa runtime Python
+# Thiết lập biến môi trường
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PYTHONPATH=/app \
+    PATH="/opt/venv/bin:$PATH" \
     PORT=8000
 
-# Cài đặt các runtime shared libraries cần thiết cho lxml và Pillow
+# Cài đặt các thư viện shared C runtime cần thiết
 RUN apt-get update && apt-get install -y --no-install-recommends \
     libxml2 \
     libxslt1.1 \
@@ -40,28 +46,25 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
     && rm -rf /var/lib/apt/lists/*
 
-# Tạo người dùng non-root vì lý do bảo mật container
+# Tạo người dùng non-root appuser vì lý do bảo mật
 RUN addgroup --system --gid 1001 appgroup && \
     adduser --system --uid 1001 --ingroup appgroup appuser
 
-# Copy Python packages từ Builder stage
-COPY --from=builder /root/.local /home/appuser/.local
+# Copy toàn bộ virtualenv từ Builder stage và gán quyền cho appuser
+COPY --from=builder --chown=appuser:appgroup /opt/venv /opt/venv
 
-# Cập nhật PATH để sử dụng user packages
-ENV PATH=/home/appuser/.local/bin:$PATH
-
-# Copy toàn bộ mã nguồn Backend vào container
+# Copy toàn bộ mã nguồn Backend vào /app
 COPY --chown=appuser:appgroup . /app
 
-# Đổi quyền sở hữu cho non-root user
+# Chuyển sang non-root user
 USER appuser
 
-# Mở cổng giao tiếp (Render sẽ tự động ghi đè qua biến $PORT)
+# Mở cổng mặc định
 EXPOSE 8000
 
-# Health check định kỳ để đảm bảo container đang hoạt động
+# Health check định kỳ
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
     CMD curl -f http://localhost:${PORT}/health || exit 1
 
-# Khởi chạy FastAPI Server bằng Uvicorn với dynamic $PORT
+# Khởi chạy FastAPI Server bằng Uvicorn với biến $PORT động của Render
 CMD ["sh", "-c", "uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8000} --workers 2 --access-log"]
