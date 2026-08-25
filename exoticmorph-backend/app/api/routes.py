@@ -114,11 +114,14 @@ def _pptx_response(presentation_data: PresentationResponse) -> Response:
 )
 async def generate_pptx_presentation(request: GenerateRequest):
     """Endpoint chính nhận yêu cầu và xuất file .pptx."""
+    # ── AUDIT LOG: ghi đầy đủ prompt nhận từ Frontend để debug nếu bị trôi ──
     logger.info(
-        "Nhận yêu cầu tạo slide: '%s' (%d slides, style: %s)",
-        request.prompt[:50],
+        "[ROUTES /generate] Nhận request | prompt=%r | num_slides=%d | style=%s | aspect_ratio=%s | lang=%s",
+        request.prompt,
         request.num_slides,
         request.style,
+        request.aspect_ratio,
+        request.language,
     )
 
     # 1. Gọi LLM để tính toán cấu trúc slide & ma trận tọa độ Morph.
@@ -154,6 +157,12 @@ async def generate_pptx_presentation(request: GenerateRequest):
 )
 async def generate_presentation_json(request: GenerateRequest):
     """Endpoint trả về cấu trúc JSON slide & tọa độ Morph để hiển thị Mock Preview trên Frontend."""
+    logger.info(
+        "[ROUTES /generate-json] Nhận request | prompt=%r | num_slides=%d | style=%s",
+        request.prompt,
+        request.num_slides,
+        request.style,
+    )
     try:
         return await generate_presentation_with_llm(request)
     except Exception as exc:

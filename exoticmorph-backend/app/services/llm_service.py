@@ -1,20 +1,16 @@
 """
-LLM Service Module for ExoticMorph (Refactored v3)
+LLM Service Module for ExoticMorph (Refactored v4)
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-TÁCH BIỆT TRÁCH NHIỆM:
-  - AI (LLM) CHỈ làm: sáng tạo nội dung (chữ, ý tưởng), chọn màu,
-    cấp morph_id cho từng thẻ và GIỮ NGUYÊN morph_id giữa slide N và N+1.
-  - Python (layout_engine.py) làm: tính hình học (x, y, width, height).
-
-CẢI TIẾN CHÍNH so với v2:
-  1. **Few-Shot Prompting**: Nhúng 3 ví dụ JSON hoàn chỉnh vào System Prompt
-     để LLM "noi gương" chính xác 100% cấu trúc `LLMOutput`.
-  2. **Structured Output Bắt Buộc**: Dùng `response_format` kèm JSON Schema
-     (OpenAI) và `response_mime_type` + `response_schema` (Gemini) để ép
-     LLM trả về JSON đúng schema không lệch một ký tự.
-  3. **Pydantic Strict Validation + Retry**: Nếu parse lỗi, tự động Retry
-     tối đa 2 lần kèm thông báo lỗi rõ ràng cho LLM tự sửa.
-  4. **KHÔNG còn x, y, width, height** trong prompt hay output của LLM.
+FIX LỖI NỘI DUNG KHÔNG BÁM SÁT CHỦ ĐỀ (v4 fixes):
+  1. **Topic Adherence Rule được đẩy lên ƯU TIÊN SỐ 1** trong System Prompt,
+     kèm cảnh báo nghiêm ngặt chống copy Few-Shot content.
+  2. **Few-Shot được làm trừu tượng (Abstract Examples)** — các ví dụ JSON
+     dùng placeholder rõ ràng "[NỘI DUNG VÍ DỤ - KHÔNG SAO CHÉP]" thay vì
+     nội dung cụ thể (tránh Few-Shot Contamination).
+  3. **User Prompt được bao bọc bằng delimiter rõ ràng**
+     (=== USER TOPIC TO GENERATE === ... === END OF USER TOPIC ===).
+  4. **Temperature = 0.4** (giảm từ 0.7 để bám chặt chủ đề hơn, vẫn đủ sáng tạo).
+  5. **Logging toàn bộ prompt flow** (để audit biến req.prompt có bị mất hay không).
 """
 
 import asyncio
@@ -33,75 +29,82 @@ from app.services.layout_engine import compute_layout
 logger = logging.getLogger("exoticmorph.llm")
 
 # ==============================================================================
-# CẤU HÌNH RETRY
+# CẤU HÌNH
 # ==============================================================================
-LLM_MAX_ATTEMPTS = 3              # Số lần gọi LLM tối đa (1 lần đầu + 2 retry)
-LLM_RETRY_BASE_DELAY_S = 1.5      # Exponential backoff
-LLM_REQUEST_TIMEOUT_S = 90.0      # Timeout mỗi lần gọi
-MAX_VALIDATION_RETRIES = 2        # Số lần retry khi Pydantic Validation fail
+LLM_MAX_ATTEMPTS = 3              # Retry lỗi tạm thời (mạng/rate-limit/5xx)
+LLM_RETRY_BASE_DELAY_S = 1.5
+LLM_REQUEST_TIMEOUT_S = 90.0
+MAX_VALIDATION_RETRIES = 2        # Retry khi Pydantic Validation fail
+
+# ⚠️ FIX: Nhiệt độ LLM hạ từ 0.7 → 0.4 để bám chủ đề, bớt ngẫu hứng.
+# (0.0 quá lặp/lạnh, 0.7+ dễ bịa chuyện lệch topic, 0.4 cân bằng tốt).
+LLM_TEMPERATURE = 0.4
 
 T = TypeVar("T")
 
 
 # ==============================================================================
-# FEW-SHOT EXAMPLES (JSON mẫu) — nhúng trực tiếp vào System Prompt
+# FEW-SHOT EXAMPLES — DẠNG ABSTRACT (KHÔNG CHỨA NỘI DUNG CỤ THỂ)
 # ==============================================================================
-# 3 ví dụ bao phủ: 2-slide cover+detail, 3-slide 3-cột, 5-slide nhiều cards.
+# QUAN TRỌNG: Các ví dụ này CHỈ dùng để minh hoẠ CẤU TRÚC JSON.
+# Nội dung (topic, title, body) được viết dạng placeholder [VÍ DỤ] rõ ràng
+# để LLM KHÔNG copy nội dung vào output thực tế. Đây là fix chính cho
+# lỗi Few-Shot Contamination (ví dụ: "Hệ Mặt Trời" cứ lặp lại).
 
 _FEW_SHOT_EXAMPLE_1 = json.dumps(
     {
-        "topic": "Giới thiệu Nền tảng AI ExoticMorph",
+        "topic": "[TÊN CHỦ ĐỀ NGẮN GỌN - VÍ DỤ MINH HOẠ]",
         "slides": [
             {
                 "slide_number": 1,
-                "slide_title": "ExoticMorph — AI Tạo Slide PowerPoint Tự Động",
+                "slide_title": "[TIÊU ĐỀ SLIDE 1 - BÁM SÁT CHỦ ĐỀ NGƯỜI DÙNG]",
                 "cards": [
                     {
                         "morph_id": "hero_card",
-                        "title": "Morph Thông Minh",
-                        "body": "Tự động tính toán tọa độ và liên kết đối tượng giữa các slide để tạo hiệu ứng Morph chuyển động mượt mà như phim.",
+                        "title": "[TIÊU ĐỀ THẺ CHÍNH 1]",
+                        "body": "[NỘI DUNG CHI TIẾT 1-3 CÂU, BÁM CHẶT CHỦ ĐỀ - KHÔNG SAO CHÉP VÍ DỤ]",
                         "color_theme": "#8B5CF6",
                         "order": 0,
                     },
                     {
-                        "morph_id": "speed_card",
-                        "title": "Tốc Độ Chớp Nhoáng",
-                        "body": "Tạo bài trình chiếu 10 slide chỉ trong 10 giây. Tích hợp GPT-4o & Gemini 1.5 Pro cho nội dung chất lượng cao.",
-                        "color_theme": "#06B6D4",
+                        "morph_id": "col_1",
+                        "title": "[TIÊU ĐỀ THẺ PHỤ 1]",
+                        "body": "[NỘI DUNG THẺ PHỤ - PHẢI LIÊN QUAN TRỰC TIẾP ĐẾN CHỦ ĐỀ]",
+                        "color_theme": "#161926",
                         "order": 1,
                     },
                     {
-                        "morph_id": "compat_card",
-                        "title": "Tương Thích 100%",
-                        "body": "File .pptx xuất ra tương thích hoàn toàn với Microsoft PowerPoint 2019+ và Microsoft 365, không cần add-in.",
-                        "color_theme": "#EC4899",
+                        "morph_id": "col_2",
+                        "title": "[TIÊU ĐỀ THẺ PHỤ 2]",
+                        "body": "[NỘI DUNG THẺ PHỤ - DỮ LIỆU/VÍ DỤ CỤ THỂ]",
+                        "color_theme": "#1E2235",
                         "order": 2,
                     },
                 ],
             },
             {
                 "slide_number": 2,
-                "slide_title": "Kiến Trúc 3 Lớp Cốt Lõi",
+                "slide_title": "[TIÊU ĐỀ SLIDE 2 - ĐI SÂU VÀO CHI TIẾT]",
                 "cards": [
                     {
                         "morph_id": "hero_card",
-                        "title": "LLM Creative Layer",
-                        "body": "Sử dụng Few-Shot Prompting và Structured Output để sinh nội dung sáng tạo, bám sát yêu cầu người dùng.",
+                        "title": "[CÙNG morph_id hero_card VỚI SLIDE 1 ĐỂ MORPH]",
+                        "body": "[NỘI DUNG CHI TIẾT HƠN VỀ CHỦ ĐỀ CHÍNH]",
                         "color_theme": "#161926",
                         "order": 0,
                     },
                     {
-                        "morph_id": "speed_card",
-                        "title": "Python Geometry Engine",
-                        "body": "Tính toán hình học (x, y, w, h) bằng công thức toán học chính xác, đảm bảo không chồng lấn, không tràn khung.",
-                        "color_theme": "#1E2235",
+                        "morph_id": "col_1",
+                        "title": "[CÙNG morph_id col_1 VỚI SLIDE 1]",
+                        "body": "[NỘI DUNG MỞ RỘNG CỦA THẺ NÀY]",
+                        "color_theme": "#06B6D4",
                         "order": 1,
                     },
                     {
-                        "morph_id": "compat_card",
-                        "title": "OpenXML Morph Builder",
-                        "body": "Chèn trực tiếp transition XML chuẩn ECMA-376 và gán '!!' morph name để PowerPoint nhận diện đối tượng Morph.",
-                        "color_theme": "#241438",
+                        "morph_id": "col_2",
+                        "title": "[CÙNG morph_id col_2 VỚI SLIDE 1]",
+                        "body": "[NỘI DUNG MỞ RỘNG CỦA THẺ NÀY]",
+                        "color_theme": "#EC4899",
                         "order": 2,
                     },
                 ],
@@ -114,149 +117,51 @@ _FEW_SHOT_EXAMPLE_1 = json.dumps(
 
 _FEW_SHOT_EXAMPLE_2 = json.dumps(
     {
-        "topic": "Báo Cáo Tài Chính Q3/2025",
+        "topic": "[VÍ DỤ 2: TÊN CHỦ ĐỀ BẤT KỲ - KHÔNG SAO CHÉP]",
         "slides": [
             {
                 "slide_number": 1,
-                "slide_title": "Tổng Quan Tài Chính Quý 3",
+                "slide_title": "[TIÊU ĐỀ MỞ ĐẦU - 1 CARD HERO]",
                 "cards": [
                     {
-                        "morph_id": "kpi_revenue",
-                        "title": "Doanh Thu $12.5M",
-                        "body": "Tăng 45% so với cùng kỳ năm ngoái, vượt chỉ tiêu 12%.",
-                        "color_theme": "#10B981",
+                        "morph_id": "main_msg",
+                        "title": "[TIÊU ĐỀ THÔNG ĐIỆP CHÍNH]",
+                        "body": "[NỘI DUNG MỞ RỘNG CHO THÔNG ĐIỆP, 1-3 CÂU]",
+                        "color_theme": "#2563EB",
                         "order": 0,
-                    },
-                    {
-                        "morph_id": "kpi_customers",
-                        "title": "1,200 Khách Hàng Enterprise",
-                        "body": "Tỷ lệ giữ chân (Net Retention) đạt 128%, dẫn đầu ngành.",
-                        "color_theme": "#3A86FF",
-                        "order": 1,
-                    },
-                    {
-                        "morph_id": "kpi_nps",
-                        "title": "NPS Score: 72",
-                        "body": "Mức hài lòng khách hàng ở mức World-Class (top 5% ngành SaaS).",
-                        "color_theme": "#F59E0B",
-                        "order": 2,
-                    },
+                    }
                 ],
             },
             {
                 "slide_number": 2,
-                "slide_title": "Phân Tích Chi Tiết Doanh Thu",
+                "slide_title": "[TIÊU ĐỀ GIỚI THIỆU - 4 CARDS 2x2 HOẶC 4 CỘT]",
                 "cards": [
                     {
-                        "morph_id": "kpi_revenue",
-                        "title": "Subscription: $9.2M",
-                        "body": "Chiếm 74% tổng doanh thu, tăng trưởng 52% YoY nhờ mở rộng Enterprise.",
-                        "color_theme": "#10B981",
+                        "morph_id": "feature_a",
+                        "title": "[ĐIỂM 1]",
+                        "body": "[MÔ TẢ ĐIỂM 1]",
+                        "color_theme": "#1E293B",
                         "order": 0,
                     },
                     {
-                        "morph_id": "rev_services",
-                        "title": "Professional Services: $2.1M",
-                        "body": "Dịch vụ triển khai và đào tạo đóng góp 17% với biên lợi nhuận 45%.",
-                        "color_theme": "#1C2541",
+                        "morph_id": "feature_b",
+                        "title": "[ĐIỂM 2]",
+                        "body": "[MÔ TẢ ĐIỂM 2]",
+                        "color_theme": "#1E293B",
                         "order": 1,
                     },
                     {
-                        "morph_id": "rev_marketplace",
-                        "title": "Marketplace: $1.2M",
-                        "body": "Kho Template & API của bên thứ ba tăng trưởng 120% QoQ.",
-                        "color_theme": "#1C2541",
-                        "order": 2,
-                    },
-                ],
-            },
-            {
-                "slide_number": 3,
-                "slide_title": "Kế Hoạch Q4/2025",
-                "cards": [
-                    {
-                        "morph_id": "plan_apac",
-                        "title": "Mở Rộng APAC",
-                        "body": "Ra mắt văn phòng Singapore & Tokyo, mục tiêu +$3M ARR từ thị trường châu Á.",
-                        "color_theme": "#8B5CF6",
-                        "order": 0,
-                    },
-                    {
-                        "morph_id": "plan_ai",
-                        "title": "Ra Mắt AI Copilot",
-                        "body": "Tích hợp trực tiếp vào PowerPoint, cho phép sửa slide bằng giọng nói.",
-                        "color_theme": "#D946EF",
-                        "order": 1,
-                    },
-                    {
-                        "morph_id": "plan_channel",
-                        "title": "Kênh Phân Phối Đối Tác",
-                        "body": "Ký hợp tác chiến lược với Microsoft AppSource và 5 đại lý cấp 1.",
-                        "color_theme": "#06B6D4",
-                        "order": 2,
-                    },
-                ],
-            },
-        ],
-    },
-    ensure_ascii=False,
-    indent=2,
-)
-
-_FEW_SHOT_EXAMPLE_3 = json.dumps(
-    {
-        "topic": "Giới Thiệu Sản Phẩm Tối Giản (Minimal Style)",
-        "slides": [
-            {
-                "slide_number": 1,
-                "slide_title": "Một Giải Pháp, Vạn Bài Trình Chiếu",
-                "cards": [
-                    {
-                        "morph_id": "main_pitch",
-                        "title": "ExoticMorph Minimal",
-                        "body": "Thiết kế tối giản tập trung vào nội dung cốt lõi. Màu sắc hài hòa, bố cục rõ ràng.",
+                        "morph_id": "feature_c",
+                        "title": "[ĐIỂM 3]",
+                        "body": "[MÔ TẢ ĐIỂM 3]",
                         "color_theme": "#6366F1",
-                        "order": 0,
-                    },
-                    {
-                        "morph_id": "feature_1",
-                        "title": "Một Click",
-                        "body": "Nhập ý tưởng, nhận file PPTX chỉ sau một cú nhấp chuột.",
-                        "color_theme": "#1E293B",
-                        "order": 1,
-                    },
-                ],
-            },
-            {
-                "slide_number": 2,
-                "slide_title": "Trải Nghiệm Người Dùng",
-                "cards": [
-                    {
-                        "morph_id": "ux_fast",
-                        "title": "Nhanh",
-                        "body": "Xử lý dưới 15 giây cho 10 slide. Không chờ đợi, không phiền phức.",
-                        "color_theme": "#1E293B",
-                        "order": 0,
-                    },
-                    {
-                        "morph_id": "ux_easy",
-                        "title": "Dễ",
-                        "body": "Giao diện trực quan, không cần kỹ năng thiết kế hay cài đặt phần mềm.",
-                        "color_theme": "#334155",
-                        "order": 1,
-                    },
-                    {
-                        "morph_id": "ux_beautiful",
-                        "title": "Đẹp",
-                        "body": "Mỗi slide được bố cục theo lưới hình học hoàn hảo, font và màu hài hòa.",
-                        "color_theme": "#1E293B",
                         "order": 2,
                     },
                     {
-                        "morph_id": "ux_smart",
-                        "title": "Thông Minh",
-                        "body": "AI hiểu ngữ cảnh, chọn morph_id nhất quán để hiệu ứng chuyển động tự nhiên.",
-                        "color_theme": "#6366F1",
+                        "morph_id": "feature_d",
+                        "title": "[ĐIỂM 4]",
+                        "body": "[MÔ TẢ ĐIỂM 4]",
+                        "color_theme": "#1E293B",
                         "order": 3,
                     },
                 ],
@@ -269,73 +174,115 @@ _FEW_SHOT_EXAMPLE_3 = json.dumps(
 
 
 # ==============================================================================
-# SYSTEM PROMPT với FEW-SHOT
+# SYSTEM PROMPT (v4 — Topic Adherence ƯU TIÊN SỐ 1)
 # ==============================================================================
-SYSTEM_PROMPT = f"""Bạn là "Master Presentation Architect" — kiến trúc sư trình chiếu hàng đầu thế giới, chuyên thiết kế nội dung cho bài thuyết trình PowerPoint với hiệu ứng Morph.
+# ⚠️ KHÔNG dùng f-string cho phần JSON examples để tránh xung đột ngoặc nhọn
+# với Python format. Examples được gắn vào bằng .replace() ở cuối, an toàn 100%.
 
-NHIỆM VỤ:
-Nhận yêu cầu từ người dùng (chủ đề, số lượng slide, phong cách, ngôn ngữ) và trả về DUY NHẤT một JSON object theo đúng schema được định nghĩa dưới đây.
+SYSTEM_PROMPT_TEMPLATE = """Bạn là "Master Presentation Architect" — kiến trúc sư trình chiếu hàng đầu thế giới, chuyên thiết kế nội dung bài thuyết trình PowerPoint có hiệu ứng Morph.
 
-QUY TẮC BẮT BUỘC (MUST OBEY — KHÔNG ĐƯỢC VI PHẠM):
+══════════════════════════════════════════════════════════════════════
+🚨 QUY TẮC QUAN TRỌNG NHẤT — TOPIC ADHERENCE (KHÔNG ĐƯỢC VI PHẠM) 🚨
+══════════════════════════════════════════════════════════════════════
 
-1. **CHỈ NỘI DUNG, KHÔNG HÌNH HỌC**:
-   - Bạn KHÔNG ĐƯỢC trả về các trường `x`, `y`, `width`, `height` ở bất kỳ đâu.
-   - Việc tính toán toạ độ và kích thước sẽ do Python Layout Engine xử lý sau.
-   - Bạn chỉ được quyết định: nội dung chữ (`title`, `body`), màu sắc (`color_theme`),
-     và `morph_id` (liên kết Morph giữa các slide).
+1. **BẠN PHẢI BÁM SÁT 100% CHỦ ĐỀ NGƯỜI DÙNG YÊU CẦU** — đó là nội dung
+   nằm giữa hai dòng "=== USER TOPIC TO GENERATE ===" và
+   "=== END OF USER TOPIC ===" trong tin nhắn user bên dưới.
+2. **KHÔNG ĐƯỢC BỊA NỘI DUNG CHUNG CHUNG / LẶP NỘI DUNG TỪ VÍ DỤ** —
+   các ví dụ JSON chỉ dùng để minh hoẠ CẤU TRÚC, không phải nội dung mẫu.
+3. **KHÔNG ĐƯỢC copy bất kỳ cụm từ / số liệu / tên sản phẩm / chủ đề nào
+   từ ví dụ vào kết quả cuối cùng.** Ví dụ nói "[NỘI DUNG VÍ DỤ]", bạn phải
+   thay bằng nội dung thật, liên quan trực tiếp đến USER TOPIC.
+4. Mỗi `title` và `body` phải chứa thông tin CHUYÊN BIỆT cho chủ đề người
+   dùng yêu cầu (số liệu cụ thể, thuật ngữ ngành, ví dụ liên quan trực tiếp),
+   không phải những câu chung chung như "Giới thiệu tổng quan về sản phẩm"
+   hay "Các điểm nổi bật của giải pháp" khi không nói rõ là gì.
+5. `topic` ở kết quả cuối cùng PHẢI là chính xác chủ đề người dùng nhập
+   (hoặc tiêu đề ngắn gọn tóm tắt đúng chủ đề đó), KHÔNG PHẢI "Ví dụ",
+   "Giới thiệu", hay tên một sản phẩm bất kỳ.
 
-2. **BẢO TOÀN MORPH_ID (QUAN TRỌNG NHẤT)**:
+══════════════════════════════════════════════════════════════════════
+NHIỆM VỤ CHI TIẾT
+══════════════════════════════════════════════════════════════════════
+Nhận yêu cầu từ người dùng (chủ đề, số lượng slide, phong cách, ngôn ngữ)
+và trả về DUY NHẤT một JSON object theo đúng schema `LLMOutput` dưới đây.
+
+══════════════════════════════════════════════════════════════════════
+CÁC QUY TẮC KHÁC (STRUCTURAL RULES)
+══════════════════════════════════════════════════════════════════════
+
+A. **CHỈ NỘI DUNG, KHÔNG HÌNH HỌC**:
+   - KHÔNG trả về `x`, `y`, `width`, `height` ở bất kỳ đâu. Python sẽ tự tính.
+   - Bạn CHỈ quyết định: `title`, `body`, `color_theme`, `morph_id`, `order`.
+
+B. **BẢO TOÀN MORPH_ID (CHO HIỆU ỨNG MORPH POWERPOINT)**:
    - `morph_id` là mã định danh DUY NHẤT cho một đối tượng nội dung.
-   - GIỮ NGUYÊN `morph_id` của một thẻ giữa slide N và slide N+1 nếu thẻ đó biểu diễn
-     cùng một nội dung (tiếp nối, mở rộng hoặc thu nhỏ) để PowerPoint Morph hoạt động.
-   - Ví dụ: Thẻ "KPI Doanh Thu" ở slide 1 có morph_id="kpi_revenue", sang slide 2
-     khi đi vào chi tiết, thẻ đó VẪN PHẢI có morph_id="kpi_revenue".
-   - Thẻ mới hoàn toàn ở slide sau phải có morph_id MỚI (chưa từng xuất hiện).
-   - Sử dụng morph_id ngắn gọn, gạch dưới, không dấu cách, không ký tự đặc biệt
-     (vd: "hero_card", "kpi_revenue", "plan_apac", "col_1").
+   - GIỮ NGUYÊN `morph_id` của một thẻ giữa slide N và slide N+1 nếu thẻ đó
+     biểu diễn cùng một nội dung (tiếp nối/mở rộng/thu nhỏ).
+   - Thẻ hoàn toàn mới ở slide sau phải có morph_id MỚI (chưa từng xuất hiện).
+   - Dùng morph_id ngắn, gạch dưới, không dấu/khoảng trắng/ký tự đặc biệt:
+     vd "hero_card", "kpi_revenue", "plan_apac", "col_1".
 
-3. **CẤU TRÚC MỖI SLIDE**:
-   - Mỗi slide có: `slide_number`, `slide_title`, và `cards` (danh sách 1-6 thẻ).
-   - Mỗi card có: `morph_id`, `title` (ngắn 1-12 từ), `body` (1-5 dòng giải thích),
-     `color_theme` (mã hex có dấu #, vd "#1E2235"), `order` (thứ tự từ 0, tăng dần).
-   - Sắp xếp `cards` theo `order` từ trái sang phải / trên xuống dưới.
+C. **CẤU TRÚC MỖI SLIDE**:
+   - Mỗi slide có: `slide_number` (tăng tuần tự từ 1), `slide_title`, `cards`.
+   - Mỗi card có: `morph_id`, `title` (ngắn 1-12 từ, in đậm), `body` (1-5 câu
+     giải thích, CÓ NỘI DUNG CỤ THỂ), `color_theme` (mã hex vd "#1E2235"),
+     `order` (thứ tự từ 0, tăng dần từ trái sang phải).
+   - Mỗi slide có 1-4 cards.
 
-4. **SỐ LƯỢNG SLIDE**: Phải trả về ĐÚNG bằng số slide người dùng yêu cầu.
+D. **SỐ LƯỢNG SLIDE**: Phải trả về ĐÚNG BẰNG số slide người dùng yêu cầu
+   (không hơn, không kém).
 
-5. **MÀU SẮC**:
-   - Dùng bảng màu phong cách tương ứng (Futuristic/Minimal/Corporate/Creative).
-   - Thẻ chính có màu điểm nhấn (accent), thẻ phụ dùng màu nền card tối.
-   - Mọi `color_theme` phải là mã hex hợp lệ 6 ký tự có dấu #.
+E. **MÀU SẮC (theo phong cách)**:
+   - Futuristic: accent tím (#8B5CF6), cyan (#06B6D4), hồng (#EC4899) trên nền tối.
+   - Minimal:    accent indigo (#6366F1), sky (#38BDF8), emerald (#10B981).
+   - Corporate:  accent xanh (#2563EB/#3A86FF), lá (#10B981), vàng (#F59E0B).
+   - Creative:   accent tím hồng (#D946EF), cam (#F59E0B), cyan (#06B6D4).
+   - Thẻ chính (điểm nhấn) dùng màu accent sáng; thẻ phụ dùng màu nền card tối.
+   - Mọi `color_theme` phải là mã hex 6 ký tự có dấu #.
 
-6. **NGÔN NGỮ**: Toàn bộ nội dung (title, body) phải bằng ngôn ngữ người dùng yêu cầu
-   ("vi" → Tiếng Việt, "en" → English).
+F. **NGÔN NGỮ**: Toàn bộ nội dung (topic, slide_title, title, body) phải
+   bằng ngôn ngữ người dùng yêu cầu ("vi" → Tiếng Việt, "en" → English).
 
-7. **ĐỊNH DẠNG**: Trả về DUY NHẤT một JSON object hợp lệ. KHÔNG bọc trong markdown
-   code fence (```json ... ```), KHÔNG thêm văn bản giải thích trước/sau JSON.
+G. **ĐỊNH DẠNG**: Trả về DUY NHẤT một JSON object hợp lệ. KHÔNG bọc trong
+   ```json code fence```, KHÔNG thêm văn bản giải thích trước/sau JSON.
+
+══════════════════════════════════════════════════════════════════════
+[VÍ DỤ MINH HOẠ CẤU TRÚC — NỘI DUNG LÀ PLACEHOLDER, KHÔNG ĐƯỢC SAO CHÉP]
+══════════════════════════════════════════════════════════════════════
+
+VÍ DỤ 1 — 2 slide, 3 cards/slide, morph_id được giữ nguyên giữa 2 slide.
+(LƯU Ý: đây là VÍ DỤ CẤU TRÚC. Bạn phải thay [CHỮ TRONG NGOẶC VUÔNG] bằng
+nội dung thật về CHỦ ĐỀ của người dùng, KHÔNG sao chép placeholder):
+
+__EXAMPLE_1__
 
 ---
-VÍ DỤ 1 — 2 slide với 3 thẻ/slide, thẻ "hero_card", "speed_card", "compat_card" giữ nguyên morph_id giữa 2 slide:
-{_FEW_SHOT_EXAMPLE_1}
+VÍ DỤ 2 — 2 slide với 1 card hero và 4 cards (minh hoạ linh hoạt số lượng cards).
+(Tiếp tục lưu ý: [CHỮ TRONG NGOẶC VUÔNG] là placeholder — KHÔNG SAO CHÉP):
 
----
-VÍ DỤ 2 — 3 slide báo cáo tài chính, thẻ KPI "kpi_revenue" giữ nguyên ID từ slide 1 sang slide 2:
-{_FEW_SHOT_EXAMPLE_2}
+__EXAMPLE_2__
 
----
-VÍ DỤ 3 — 2 slide phong cách Minimal, slide 2 có 4 thẻ (grid 2x2):
-{_FEW_SHOT_EXAMPLE_3}
----
+══════════════════════════════════════════════════════════════════════
+HÃY BẮT ĐẦU
+══════════════════════════════════════════════════════════════════════
+Đọc kỹ phần "=== USER TOPIC TO GENERATE ===" trong tin nhắn user bên dưới,
+tạo nội dung 100% bám sát chủ đề đó theo cấu trúc JSON đã minh hoạ.
+"""
 
-Hãy noi gương chính xác cấu trúc của các ví dụ trên khi tạo bài trình chiếu mới."""
+# Gắn abstract examples vào SYSTEM_PROMPT (không dùng f-string cho examples
+# để tránh xung đột nếu example có chứa { } — dù đã json.dumps an toàn, cách
+# này rõ ràng và phòng thủ tuyệt đối).
+SYSTEM_PROMPT = (
+    SYSTEM_PROMPT_TEMPLATE
+    .replace("__EXAMPLE_1__", _FEW_SHOT_EXAMPLE_1)
+    .replace("__EXAMPLE_2__", _FEW_SHOT_EXAMPLE_2)
+)
 
 
 # ==============================================================================
 # HELPERS
 # ==============================================================================
-
-def _clamp(value: float, lo: float, hi: float) -> float:
-    return max(lo, min(value, hi))
-
 
 def _extract_json_object(text: str) -> dict:
     """Trích JSON object đầu tiên từ phản hồi LLM (chịu lỗi markdown fence)."""
@@ -359,7 +306,7 @@ def _extract_json_object(text: str) -> dict:
     except json.JSONDecodeError:
         pass
 
-    # Quét ngoặc cân bằng (xử lý text thừa quanh JSON)
+    # Quét ngoặc cân bằng
     start = cleaned.find("{")
     while start != -1:
         depth = 0
@@ -395,7 +342,7 @@ def _extract_json_object(text: str) -> dict:
 
 
 def _is_transient_error(exc: Exception) -> bool:
-    """Phân loại lỗi tạm thời (đáng retry với backoff) vs lỗi logic."""
+    """Phân loại lỗi tạm thời (đáng retry) vs lỗi logic."""
     status = getattr(exc, "status_code", None)
     if isinstance(status, int) and status in (408, 429, 500, 502, 503, 504):
         return True
@@ -436,7 +383,7 @@ async def _call_with_retry(
 
 
 # ==============================================================================
-# OPENAI CLIENT (Async, connection pooling)
+# OPENAI CLIENT
 # ==============================================================================
 _openai_client: Optional[Any] = None
 
@@ -454,18 +401,39 @@ def _get_openai_client() -> Any:
 
 
 def _build_user_prompt(req: GenerateRequest) -> str:
-    """Xây dựng user prompt mô tả chính xác yêu cầu."""
+    """Xây dựng user prompt — CHUẨN HÓA THEO DẠNG DELIMITER RÕ RÀNG.
+
+    ⚠️ CRITICAL: Biến req.prompt được đặt giữa 2 dòng delimiter độc đáo để
+    LLM không bị nhầm lẫn đâu là yêu cầu thật, đâu là system instruction.
+    Đây là fix then chốt cho lỗi "user prompt bị trôi / bị bỏ qua".
+    """
     lang = "Tiếng Việt" if req.language.lower().startswith("vi") else "English"
+
+    # Log audit: in ra để dev kiểm tra prompt có được truyền nguyên vẹn hay không
+    logger.info(
+        "Building user prompt | prompt=%r | num_slides=%d | style=%s | lang=%s",
+        req.prompt[:120], req.num_slides, req.style, lang,
+    )
+
+    # Dùng delimiter độc đáo (bằng =, không phải ngoặc nhọn) để không xung đột JSON
     return (
-        f"YÊU CẦU:\n"
-        f"- Chủ đề: {req.prompt}\n"
-        f"- Số lượng slide: {req.num_slides} (BẮT BUỘC đúng con số này)\n"
-        f"- Phong cách: {req.style}\n"
-        f"- Tỉ lệ: {req.aspect_ratio}\n"
-        f"- Ngôn ngữ nội dung: {lang}\n"
+        "================================================================\n"
+        "=== USER TOPIC TO GENERATE ===\n"
+        "================================================================\n"
+        f"{req.prompt}\n"
+        "================================================================\n"
+        "=== END OF USER TOPIC ===\n"
+        "================================================================\n\n"
+        "CÁC THAM SỐ BỔ SUNG:\n"
+        f"- Số lượng slide cần tạo (BẮT BUỘC đúng): {req.num_slides}\n"
+        f"- Phong cách thiết kế: {req.style}\n"
+        f"- Tỉ lệ khung hình: {req.aspect_ratio}\n"
+        f"- Ngôn ngữ nội dung (toàn bộ title/body phải dùng ngôn ngữ này): {lang}\n"
         f"- Sinh speaker notes: {'Có' if req.include_speaker_notes else 'Không'}\n\n"
-        f"Hãy trả về JSON đúng schema LLMOutput (chỉ nội dung, KHÔNG có x/y/width/height). "
-        f"NHỚ GIỮ NGUYÊN morph_id cho các thẻ tương ứng giữa slide N và slide N+1."
+        "HÃY NHỚ LẠI QUY TẮT SỐ 1: Mọi nội dung (topic, slide_title, title, body) "
+        "phải BÁM SÁT 100% chủ đề trong vùng === USER TOPIC TO GENERATE === ở trên. "
+        "KHÔNG sao chép nội dung từ ví dụ, KHÔNG bịa nội dung chung chung. "
+        "Trả về đúng JSON schema LLMOutput, không markdown fence, không giải thích."
     )
 
 
@@ -474,15 +442,10 @@ def _build_user_prompt(req: GenerateRequest) -> str:
 # ==============================================================================
 
 def _validate_llm_output(data: dict) -> LLMOutput:
-    """Validate dữ liệu thô bằng Pydantic LLMOutput strict schema.
-
-    Raises:
-        ValueError: nếu validation fail (kèm thông báo lỗi rõ ràng cho retry).
-    """
+    """Validate dữ liệu thô bằng Pydantic LLMOutput strict schema."""
     try:
         return LLMOutput.model_validate(data)
     except Exception as exc:
-        # Tạo thông báo lỗi ngắn gọn để LLM tự sửa
         errors = []
         try:
             from pydantic import ValidationError
@@ -497,30 +460,58 @@ def _validate_llm_output(data: dict) -> LLMOutput:
         raise ValueError(error_msg) from exc
 
 
+# Kiểm tra nhanh nội dung topic xem có bị nhiễm placeholder hay không
+def _content_smell_check(result: LLMOutput, original_prompt: str) -> None:
+    """Cảnh báo nếu nội dung có dấu hiệu bị nhiễm few-shot placeholder."""
+    suspicious_tokens = [
+        "[VÍ DỤ", "[NỘI DUNG VÍ DỤ", "[CHỦ ĐỀ", "[TIÊU ĐỀ", "[NỘI DUNG",
+        "VÍ DỤ MINH HOẠ", "KHÔNG SAO CHÉP", "PLACEHOLDER", "[TÊN CHỦ ĐỀ",
+    ]
+    combined = (result.topic or "").lower()
+    for s in result.slides:
+        combined += " " + (s.slide_title or "").lower()
+        for c in s.cards:
+            combined += " " + (c.title or "").lower() + " " + (c.body or "").lower()
+    hits = [t for t in suspicious_tokens if t.lower() in combined]
+    if hits:
+        logger.warning(
+            "Nội dung LLM có dấu hiệu nhiễm placeholder tokens=%s — có thể model chưa tuân thủ topic adherence.",
+            hits,
+        )
+    # Kiểm tra topic có khớp với user prompt không (so sánh đơn giản token overlap)
+    prompt_tokens = set(w for w in original_prompt.lower().split() if len(w) >= 3)
+    topic_tokens = set(w for w in (result.topic or "").lower().split() if len(w) >= 3)
+    if prompt_tokens and topic_tokens and not (prompt_tokens & topic_tokens):
+        logger.warning(
+            "Topic kết quả '%s' không chia sẻ từ khoá nào với user prompt '%s' — có thể lệch chủ đề.",
+            result.topic[:60], original_prompt[:60],
+        )
+
+
 async def _parse_with_retry(
-    raw_text_getter: Callable[[str], Any],
+    raw_text_getter: Callable[[list], Any],
     build_messages: Callable[[str], list],
     req: GenerateRequest,
     provider: str,
 ) -> LLMOutput:
-    """Pipeline: gọi LLM -> trích JSON -> validate Pydantic -> retry tối đa 2 lần nếu lỗi.
-
-    Retry với feedback lỗi cụ thể để LLM tự sửa sai.
-    """
+    """Pipeline: gọi LLM -> trích JSON -> validate Pydantic -> content smell check."""
     last_validation_error: Optional[str] = None
 
-    for attempt in range(1, MAX_VALIDATION_RETRIES + 2):  # 1 chính + 2 retry
-        # Gọi LLM (có thể kèm feedback lỗi lần trước)
-        messages = build_messages(
-            _build_user_prompt(req)
-            if last_validation_error is None
-            else _build_user_prompt(req) + f"\n\nLẦN TRƯỚC BẠN BỊ LỖI, HÃY SỬA:\n{last_validation_error}\n\nHãy trả về JSON đã sửa, đúng schema, không giải thích thêm."
-        )
+    for attempt in range(1, MAX_VALIDATION_RETRIES + 2):
+        user_prompt_text = _build_user_prompt(req)
+
+        if last_validation_error is not None:
+            user_prompt_text = (
+                user_prompt_text
+                + f"\n\n=== LỖI LẦN TRƯỚC (HÃY SỬA) ===\n{last_validation_error}\n\n"
+                + "Hãy trả về JSON ĐÃ SỬA, bám sát USER TOPIC, đúng schema, không giải thích."
+            )
+
+        messages = build_messages(user_prompt_text)
 
         try:
             raw_text = await raw_text_getter(messages)
-        except Exception as exc:
-            # Lỗi mạng/API -> retry với backoff tầng trên (_call_with_retry)
+        except Exception:
             raise
 
         # Parse JSON
@@ -528,10 +519,7 @@ async def _parse_with_retry(
             data = _extract_json_object(raw_text or "")
         except ValueError as exc:
             last_validation_error = f"Lỗi parse JSON: {exc}"
-            logger.warning(
-                "%s parse JSON lỗi (lần %d): %s",
-                provider, attempt, last_validation_error,
-            )
+            logger.warning("%s parse JSON lỗi (lần %d): %s", provider, attempt, last_validation_error)
             if attempt > MAX_VALIDATION_RETRIES:
                 raise
             await asyncio.sleep(LLM_RETRY_BASE_DELAY_S * attempt)
@@ -540,9 +528,11 @@ async def _parse_with_retry(
         # Validate Pydantic
         try:
             result = _validate_llm_output(data)
+            # Smell check (chỉ warning, không fail)
+            _content_smell_check(result, req.prompt)
             logger.info(
-                "%s đã sinh thành công %d slide (lần thử %d)!",
-                provider, len(result.slides), attempt,
+                "%s đã sinh thành công %d slide (topic=%r, lần %d)",
+                provider, len(result.slides), result.topic[:60], attempt,
             )
             return result
         except ValueError as exc:
@@ -555,8 +545,7 @@ async def _parse_with_retry(
                 raise
             await asyncio.sleep(LLM_RETRY_BASE_DELAY_S * attempt)
 
-    # Không bao giờ đến được đây (vòng lặp luôn return/raise)
-    raise RuntimeError("Unreachable: retry loop exhausted without return or raise")
+    raise RuntimeError("Unreachable: retry loop exhausted")
 
 
 # ==============================================================================
@@ -564,17 +553,13 @@ async def _parse_with_retry(
 # ==============================================================================
 
 async def _generate_with_openai(req: GenerateRequest) -> LLMOutput:
-    """Gọi OpenAI GPT-4o với Structured Output (JSON Schema mode)."""
-    logger.info("Đang gọi OpenAI %s (Structured Output)...", settings.OPENAI_MODEL)
+    """Gọi OpenAI với Structured Output + temperature=0.4."""
+    logger.info("Gọi OpenAI %s (Structured Output, temp=%.1f)...", settings.OPENAI_MODEL, LLM_TEMPERATURE)
 
     client = _get_openai_client()
-
-    # JSON Schema cho Structured Output — được tạo động từ Pydantic LLMOutput
     json_schema = LLMOutput.model_json_schema()
-    # Bỏ trường 'title' mà Pydantic tự sinh để tránh warning của OpenAI
     json_schema.pop("title", None)
 
-    # Xây messages có kèm feedback lỗi nếu retry
     def _messages(user_content: str) -> list:
         return [
             {"role": "system", "content": SYSTEM_PROMPT},
@@ -583,7 +568,6 @@ async def _generate_with_openai(req: GenerateRequest) -> LLMOutput:
 
     async def _raw_getter(messages: list) -> str:
         async def _call():
-            # Ưu tiên dùng structured output (response_format json_schema) nếu SDK hỗ trợ
             try:
                 return await client.chat.completions.create(
                     model=settings.OPENAI_MODEL,
@@ -596,17 +580,15 @@ async def _generate_with_openai(req: GenerateRequest) -> LLMOutput:
                             "schema": json_schema,
                         },
                     },
-                    temperature=0.7,
+                    temperature=LLM_TEMPERATURE,
                 )
             except Exception:  # noqa: BLE001
-                # Fallback về json_object mode (model cũ / SDK cũ)
                 return await client.chat.completions.create(
                     model=settings.OPENAI_MODEL,
                     messages=messages,
                     response_format={"type": "json_object"},
-                    temperature=0.7,
+                    temperature=LLM_TEMPERATURE,
                 )
-
         resp = await _call_with_retry("OpenAI", _call)
         return resp.choices[0].message.content if resp.choices else None
 
@@ -614,17 +596,16 @@ async def _generate_with_openai(req: GenerateRequest) -> LLMOutput:
 
 
 async def _generate_with_gemini(req: GenerateRequest) -> LLMOutput:
-    """Gọi Google Gemini 1.5 Pro với response_schema (Structured Output)."""
-    logger.info("Đang gọi Gemini %s (Structured Output)...", settings.GEMINI_MODEL)
+    """Gọi Google Gemini với response_schema + temperature=0.4."""
+    logger.info("Gọi Gemini %s (Structured Output, temp=%.1f)...", settings.GEMINI_MODEL, LLM_TEMPERATURE)
 
     import google.generativeai as genai
     genai.configure(api_key=settings.GEMINI_API_KEY)
 
-    # Cấu hình Structured Output với Pydantic schema trực tiếp
     generation_config = {
         "response_mime_type": "application/json",
         "response_schema": LLMOutput,
-        "temperature": 0.7,
+        "temperature": LLM_TEMPERATURE,
     }
 
     model = genai.GenerativeModel(
@@ -634,8 +615,6 @@ async def _generate_with_gemini(req: GenerateRequest) -> LLMOutput:
     )
 
     def _messages(user_content: str) -> list:
-        # Gemini không có cơ chế messages kiểu OpenAI cho generate_content;
-        # ta nối system prompt + user content + feedback thành một prompt.
         return [user_content]
 
     async def _raw_getter(messages: list) -> str:
@@ -666,110 +645,106 @@ def _provider_ready(provider: str) -> bool:
 # ==============================================================================
 
 def generate_fallback_presentation(req: GenerateRequest) -> PresentationResponse:
-    """Sinh LLMOutput dự phòng bằng thuật toán heuristic rồi chạy qua Layout Engine."""
-    logger.info("Dùng Heuristic Fallback Generator cho prompt: %s", req.prompt[:60])
+    """Sinh LLMOutput dự phòng rồi chạy qua Layout Engine."""
+    logger.info("Dùng Heuristic Fallback Generator cho prompt: %s", req.prompt[:80])
 
     from app.schemas.slide_schema import ContentCard, RawSlideContent
 
     num_slides = max(1, min(req.num_slides, 20))
-    style = req.style
-
-    # Bảng màu theo style (hex thẻ)
-    accent_palettes = {
+    accents = {
         "Futuristic": ["#8B5CF6", "#06B6D4", "#EC4899", "#161926", "#1E2235"],
         "Minimal":    ["#6366F1", "#38BDF8", "#10B981", "#1E293B", "#334155"],
         "Corporate":  ["#3A86FF", "#10B981", "#F59E0B", "#1C2541", "#2563EB"],
         "Creative":   ["#D946EF", "#F59E0B", "#06B6D4", "#241438", "#341D4E"],
-    }
-    accents = accent_palettes.get(style, accent_palettes["Futuristic"])
+    }.get(req.style, ["#8B5CF6", "#06B6D4", "#EC4899", "#161926", "#1E2235"])
 
-    title = req.prompt.split("\n")[0].strip()[:60] or "Bài Trình Chiếu ExoticMorph"
+    topic_title = req.prompt.split("\n")[0].strip()
+    if len(topic_title) > 80:
+        topic_title = topic_title[:77] + "..."
+    if not topic_title:
+        topic_title = "Bài Trình Chiếu ExoticMorph"
 
     raw_slides: list = []
 
-    # --- Slide 1: Cover (3 thẻ) ---
     raw_slides.append(RawSlideContent(
         slide_number=1,
-        slide_title=title,
+        slide_title=f"Tổng Quan: {topic_title}",
         cards=[
             ContentCard(
                 morph_id="hero_card",
-                title="Tổng Quan",
-                body=f"Giới thiệu chủ đề: {title}. Các điểm chính sẽ được trình bày trong các slide tiếp theo với hiệu ứng Morph mượt mà.",
+                title=f"Giới Thiệu Chủ Đề",
+                body=f"Tổng quan về '{topic_title}': các vấn đề cốt lõi, bối cảnh và lý do chủ đề này quan trọng. Toàn bộ bài trình chiếu sẽ đi sâu vào các khía cạnh liên quan trực tiếp đến yêu cầu của bạn.",
                 color_theme=accents[0],
                 order=0,
             ),
             ContentCard(
                 morph_id="col_1",
                 title="Điểm Nổi Bật",
-                body="Những giá trị cốt lõi và lợi ích nổi trội nhất của giải pháp được làm rõ ở slide sau.",
+                body=f"Những khía cạnh/giá trị/lợi ích đáng chú ý nhất liên quan đến {topic_title}, được phân tích dựa trên góc nhìn chuyên ngành.",
                 color_theme=accents[3],
                 order=1,
             ),
             ContentCard(
                 morph_id="col_2",
-                title="Lộ Trình",
-                body="Các bước triển khai và kế hoạch hành động cụ thể sẽ được trình bày chi tiết ở các slide kế tiếp.",
+                title="Cấu Trúc Bài",
+                body="Các slide tiếp theo sẽ lần lượt đi vào chi tiết: phân tích chuyên sâu, số liệu minh chứng và đề xuất giải pháp/kế hoạch hành động cụ thể.",
                 color_theme=accents[3],
                 order=2,
             ),
         ],
     ))
 
-    # --- Slide 2: Chi tiết 3 cột (giữ nguyên morph_id col_1, col_2, hero_card) ---
     if num_slides >= 2:
         raw_slides.append(RawSlideContent(
             slide_number=2,
-            slide_title="Phân Tích Chi Tiết 3 Trụ Cột",
+            slide_title=f"Phân Tích Chuyên Sâu: {topic_title}",
             cards=[
                 ContentCard(
                     morph_id="hero_card",
-                    title="Giá Trị Cốt Lõi",
-                    body="Đi sâu vào giá trị chính mà giải pháp mang lại, phân tích các yếu tố then chốt tạo nên thành công.",
+                    title="Yếu Tố Cốt Lõi",
+                    body=f"Đi sâu vào thành phần/nguyên nhân/yếu tố quan trọng nhất làm nên {topic_title}. Giải thích tại sao đây là điểm then chốt cần được ưu tiên hàng đầu.",
                     color_theme=accents[0],
                     order=0,
                 ),
                 ContentCard(
                     morph_id="col_1",
-                    title="Dữ Liệu & Chứng Minh",
-                    body="Các số liệu thực tế, nghiên cứu điển hình và bằng chứng thuyết phục minh chứng hiệu quả.",
+                    title="Dữ Liệu & Bằng Chứng",
+                    body="Các số liệu, nghiên cứu điển hình hoặc thống kê thực tế liên quan trực tiếp đến chủ đề, giúp minh chứng cho luận điểm chính.",
                     color_theme=accents[1],
                     order=1,
                 ),
                 ContentCard(
                     morph_id="col_2",
-                    title="Giải Pháp Công Nghệ",
-                    body="Kiến trúc kỹ thuật, công nghệ sử dụng và khả năng mở rộng trong tương lai.",
+                    title="Giải Pháp/Công Nghệ",
+                    body=f"Cách tiếp cận, công cụ hoặc phương pháp cụ thể có thể áp dụng để giải quyết vấn đề/khai thác cơ hội từ {topic_title}.",
                     color_theme=accents[2],
                     order=2,
                 ),
             ],
         ))
 
-    # --- Slide 3: 2 thẻ lớn (hero + metric) ---
     if num_slides >= 3:
         raw_slides.append(RawSlideContent(
             slide_number=3,
-            slide_title="Kết Quả Đo Lường Được",
+            slide_title="Kết Quả & Lợi Ích Kỳ Vọng",
             cards=[
                 ContentCard(
                     morph_id="hero_card",
-                    title="+45% Tăng Trưởng",
-                    body="Hiệu suất tăng trưởng vượt trội sau khi áp dụng giải pháp, được đo lường qua các KPI thực tế trong 6 tháng.",
+                    title="Tác Động Chính",
+                    body=f"Kết quả/lợi ích lớn nhất khi áp dụng thành công các giải pháp về {topic_title} — ảnh hưởng trực tiếp đến mục tiêu tổng thể.",
                     color_theme=accents[0],
                     order=0,
                 ),
                 ContentCard(
                     morph_id="kpi_roi",
-                    title="ROI 300%",
-                    body="Tỷ lệ hoàn vốn đầu tư đạt 300% trong năm đầu tiên, tiết kiệm 65% chi phí vận hành và nhân lực.",
+                    title="Chỉ Số Đo Lường",
+                    body="Các KPI cụ thể để theo dõi tiến độ và thành công, giúp đánh giá hiệu quả sau khi triển khai một cách khách quan.",
                     color_theme=accents[4],
                     order=1,
                 ),
             ],
         ))
 
-    # --- Slide 4: Roadmap 4 thẻ ---
     if num_slides >= 4:
         raw_slides.append(RawSlideContent(
             slide_number=4,
@@ -777,76 +752,74 @@ def generate_fallback_presentation(req: GenerateRequest) -> PresentationResponse
             cards=[
                 ContentCard(
                     morph_id="stage_1",
-                    title="Giai Đoạn 1",
-                    body="Khởi tạo dự án, thu thập yêu cầu và thiết kế kiến trúc tổng thể.",
+                    title="Giai Đoạn 1 — Chuẩn Bị",
+                    body="Khởi tạo, thu thập yêu cầu chi tiết, thiết kế kế hoạch và chuẩn bị nguồn lực cần thiết để bắt đầu.",
                     color_theme=accents[0],
                     order=0,
                 ),
                 ContentCard(
                     morph_id="stage_2",
-                    title="Giai Đoạn 2",
-                    body="Phát triển MVP, kiểm thử nội bộ và tinh chỉnh theo phản hồi.",
+                    title="Giai Đoạn 2 — Thử Nghiệm",
+                    body="Triển khai thí điểm (MVP/Pilot), thu thập phản hồi và tinh chỉnh quy trình trước khi nhân rộng.",
                     color_theme=accents[3],
                     order=1,
                 ),
                 ContentCard(
                     morph_id="stage_3",
-                    title="Giai Đoạn 3",
-                    body="Beta testing với khách hàng chiến lược và tối ưu hiệu năng.",
+                    title="Giai Đoạn 3 — Mở Rộng",
+                    body="Triển khai trên quy mô lớn, tối ưu hiệu năng và tích hợp với các hệ thống liên quan.",
                     color_theme=accents[3],
                     order=2,
                 ),
                 ContentCard(
                     morph_id="stage_4",
-                    title="Giai Đoạn 4",
-                    body="Ra mắt chính thức, mở rộng quy mô và phát triển hệ sinh thái.",
+                    title="Giai Đoạn 4 — Vận Hành",
+                    body="Đưa vào vận hành ổn định, giám sát liên tục và cải tiến dựa trên dữ liệu thực tế.",
                     color_theme=accents[1],
                     order=3,
                 ),
             ],
         ))
 
-    # --- Slide 5: CTA (hero card) ---
     if num_slides >= 5:
         raw_slides.append(RawSlideContent(
             slide_number=5,
-            slide_title="Sẵn Sàng Bắt Đầu",
+            slide_title=f"Kết Luận & Bước Tiếp Theo",
             cards=[
                 ContentCard(
                     morph_id="hero_card",
-                    title="Hãy Cùng Nhau Kiến Tạo Tương Lai",
-                    body="Liên hệ đội ngũ ExoticMorph để bắt đầu hành trình tạo ra những bài thuyết trình ấn tượng. Truy cập GitHub để xem mã nguồn mở.",
+                    title=f"Bắt Đầu Hành Trình",
+                    body=f"Tóm tắt lại thông điệp cốt lõi về {topic_title} và kêu gọi hành động cụ thể để đưa ý tưởng thành hiện thực. Hãy liên hệ để bắt đầu ngay hôm nay.",
                     color_theme=accents[0],
                     order=0,
                 ),
             ],
         ))
 
-    # Slide thêm (6..N): 2 thẻ mỗi slide
     if num_slides > 5:
         for s_idx in range(6, num_slides + 1):
             raw_slides.append(RawSlideContent(
                 slide_number=s_idx,
-                slide_title=f"Chuyên Đề Mở Rộng {s_idx - 5}",
+                slide_title=f"Chuyên Đề Mở Rộng {s_idx - 5}: {topic_title}",
                 cards=[
                     ContentCard(
                         morph_id=f"extra_{s_idx}_1",
                         title=f"Phân Tích Sâu #{s_idx - 5}A",
-                        body="Nội dung chuyên sâu về khía cạnh kỹ thuật và dữ liệu liên quan đến chủ đề chính.",
+                        body=f"Đào sâu khía cạnh/kịch bản/thách thức đặc thù liên quan trực tiếp đến {topic_title} chưa được đề cập ở các slide trước.",
                         color_theme=accents[3],
                         order=0,
                     ),
                     ContentCard(
                         morph_id=f"extra_{s_idx}_2",
                         title=f"Phân Tích Sâu #{s_idx - 5}B",
-                        body="Đề xuất giải pháp bổ sung và kế hoạch thực thi chi tiết cho các tình huống đặc thù.",
+                        body=f"Đề xuất giải pháp chi tiết hoặc bài học kinh nghiệm rút ra cho khía cạnh được phân tích tại thẻ bên cạnh.",
                         color_theme=accents[4],
                         order=1,
                     ),
                 ],
             ))
 
-    llm_output = LLMOutput(topic=req.prompt, slides=raw_slides[:num_slides])
+    llm_output = LLMOutput(topic=topic_title, slides=raw_slides[:num_slides])
     return compute_layout(llm_output, req)
 
 
@@ -855,16 +828,19 @@ def generate_fallback_presentation(req: GenerateRequest) -> PresentationResponse
 # ==============================================================================
 
 async def generate_presentation_with_llm(req: GenerateRequest) -> PresentationResponse:
-    """Gọi LLM -> nhận LLMOutput (chỉ nội dung) -> chạy Layout Engine -> PresentationResponse.
+    """Gọi LLM -> LLMOutput -> Layout Engine -> PresentationResponse.
 
-    Chuỗi chống lỗi 3 tầng:
-      1. Provider chính (có retry mạng + retry Pydantic validation).
-      2. Provider dự phòng (cross-fallback).
-      3. Heuristic Fallback Generator — KHÔNG BAO GIỜ fail.
+    ⚠️ AUDIT LOG: Ghi log prompt đầy đủ (dưới dạng tiền tố) để kiểm tra biến
+    req.prompt có bị mất/trôi trên luồng từ Frontend vào LLM hay không.
     """
     provider = settings.LLM_PROVIDER.lower()
 
-    # Xây dựng chuỗi provider thử
+    # Audit log: in ngay đầu pipeline để verify flow
+    logger.info(
+        "[AUDIT] generate_presentation_with_llm called with prompt=%r num_slides=%d style=%s lang=%s",
+        req.prompt[:200], req.num_slides, req.style, req.language,
+    )
+
     provider_chain: list = []
     if provider != "mock":
         if _provider_ready(provider):
@@ -877,11 +853,14 @@ async def generate_presentation_with_llm(req: GenerateRequest) -> PresentationRe
 
     for idx, name in enumerate(provider_chain):
         try:
-            # 1) Gọi LLM để nhận LLMOutput (strict schema, không geometry)
             raw_output: LLMOutput = await _PROVIDER_FUNCS[name](req)
-
-            # 2) Chạy Python Layout Engine để tính hình học (x, y, w, h)
             presentation = compute_layout(raw_output, req)
+            logger.info(
+                "[AUDIT] LLM returned topic=%r (user prompt=%r) — match=%s",
+                raw_output.topic[:80],
+                req.prompt[:80],
+                bool(set(req.prompt.lower().split()) & set(raw_output.topic.lower().split())),
+            )
             return presentation
 
         except Exception as exc:  # noqa: BLE001
@@ -892,7 +871,6 @@ async def generate_presentation_with_llm(req: GenerateRequest) -> PresentationRe
                 "" if is_last else " Chuyển sang provider dự phòng...",
             )
 
-    # Fallback cuối cùng: heuristic generator (đã tích hợp sẵn layout engine)
     if provider_chain:
         logger.warning("Tất cả LLM provider đều thất bại — dùng Heuristic Fallback.")
     return generate_fallback_presentation(req)
