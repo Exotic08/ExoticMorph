@@ -7,6 +7,63 @@ export type AspectRatioOption = "16:9" | "4:3";
 export type SlideStyleOption = "Minimal" | "Futuristic" | "Corporate" | "Creative";
 
 /**
+ * Shape của JSON trả về TRỰC TIẾP từ FastAPI Backend (giữ nguyên snake_case).
+ * Dùng cho cả việc parse response và gửi ngược lên /api/v1/build-pptx.
+ */
+export interface BackendSlideElement {
+  id: string;
+  type: "text" | "shape" | "card" | "metric" | "heading" | "badge";
+  content: string;
+  label?: string | null;
+  sub_text?: string | null;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  bg_color?: string | null;
+  text_color?: string | null;
+  morph_id: string;
+  font_size?: number | null;
+  shape_type?: string | null;
+  border_color?: string | null;
+}
+
+export interface BackendSlide {
+  slide_number: number;
+  title: string;
+  subtitle?: string | null;
+  speaker_notes?: string | null;
+  morph_description?: string | null;
+  bg_color?: string | null;
+  elements: BackendSlideElement[];
+}
+
+export interface BackendPresentation {
+  topic: string;
+  style: SlideStyleOption;
+  aspect_ratio: AspectRatioOption;
+  total_slides: number;
+  slides: BackendSlide[];
+  morph_strategy?: string | null;
+}
+
+/** Kết quả health check từ /api/v1/health */
+export interface BackendHealthResponse {
+  status: string;
+  service: string;
+  version: string;
+  llm_provider: string;
+  openai_configured?: boolean;
+  gemini_configured?: boolean;
+}
+
+export interface BackendHealthStatus {
+  online: boolean;
+  provider?: string;
+  version?: string;
+}
+
+/**
  * Form data collected from user input
  */
 export interface PromptFormData {

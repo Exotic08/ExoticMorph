@@ -3,6 +3,13 @@ Pydantic Schemas for Slide Generation & LLM Structured Outputs
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 Định nghĩa cấu trúc dữ liệu nghiêm ngặt cho yêu cầu, phản hồi và định dạng JSON
 trả về từ LLM (OpenAI GPT-4o / Gemini 1.5 Pro).
+
+Nâng cấp trong đợt rework:
+- Giới hạn độ dài danh sách (slides/elements) để chặn payload khổng lồ gây
+  cạn bộ nhớ RAM trên free-tier (Render 512MB).
+- Bổ sung `speaker_notes` cho từng slide (trước đây UI có toggle nhưng là
+  tính năng chết — dữ liệu lời dẫn bị bịa phía client).
+- Bổ sung `include_speaker_notes` trong request để bật/tắt thật sự.
 """
 
 from typing import List, Optional, Literal
@@ -18,10 +25,14 @@ AspectRatioType = Literal["16:9", "4:3"]
 # Phong cách đồ họa
 StyleType = Literal["Futuristic", "Minimal", "Corporate", "Creative"]
 
+# Giới hạn an toàn chống lạm dụng bộ nhớ khi build PPTX
+MAX_ELEMENTS_PER_SLIDE = 40
+MAX_SLIDES_PER_PRESENTATION = 30
+
 
 class SlideElement(BaseModel):
     """Đại diện cho một phần tử đơn lẻ trên slide (thẻ, văn bản, số liệu, hình khối).
-    
+
     Tọa độ x, y, width, height được tính theo % chiều rộng và chiều cao màn hình (0.0 -> 100.0).
     Thuộc tính `morph_id` BẮT BUỘC giữ nguyên giữa các slide nếu đối tượng cần biến đổi hình ảnh mượt mà.
     """
@@ -34,7 +45,8 @@ class SlideElement(BaseModel):
         description="Loại phần tử: 'heading' | 'text' | 'card' | 'metric' | 'shape' | 'badge'",
     )
     content: str = Field(
-        description="Nội dung văn bản chính hiển thị trên phần tử"
+        default="",
+        description="Nội dung văn bản chính hiển thị trên phần tử",
     )
     x: float = Field(
         ge=0.0,
@@ -65,10 +77,13 @@ class SlideElement(BaseModel):
         description="Mã màu chữ Hex (ví dụ: '#FFFFFF', '#94A3B8')",
     )
     morph_id: str = Field(
-        description="ID liên kết Morph duy nhất (ví dụ: 'kpi_card_1'). Các shape ở các slide tiếp theo có cùng morph_id sẽ tự động biến đổi vị trí và kích thước!"
+        default="",
+        description="ID liên kết Morph duy nhất (ví dụ: 'kpi_card_1'). Các shape ở các slide tiếp theo có cùng morph_id sẽ tự động biến đổi vị trí và kích thước!",
     )
     font_size: Optional[int] = Field(
         default=None,
+        ge=6,
+        le=200,
         description="Kích thước font chữ (Pt) gợi ý",
     )
     shape_type: Optional[str] = Field(
@@ -97,11 +112,17 @@ class Slide(BaseModel):
         description="Thứ tự slide bắt đầu từ 1",
     )
     title: str = Field(
-        description="Tiêu đề chính của slide"
+        default="",
+        description="Tiêu đề chính của slide",
     )
     subtitle: Optional[str] = Field(
         default=None,
         description="Tiêu đề phụ hoặc thông điệp dẫn dắt",
+    )
+    speaker_notes: Optional[str] = Field(
+        default=None,
+        max_length=2000,
+        description="Lời dẫn người thuyết trình (speaker notes) cho slide này",
     )
     morph_description: Optional[str] = Field(
         default=None,
@@ -113,6 +134,7 @@ class Slide(BaseModel):
     )
     elements: List[SlideElement] = Field(
         default_factory=list,
+        max_length=MAX_ELEMENTS_PER_SLIDE,
         description="Danh sách các phần tử trực quan trên slide",
     )
 
@@ -121,7 +143,8 @@ class PresentationResponse(BaseModel):
     """Cấu trúc dữ liệu toàn bộ bài trình chiếu trả về từ LLM."""
 
     topic: str = Field(
-        description="Chủ đề bài thuyết trình"
+        default="",
+        description="Chủ đề bài thuyết trình",
     )
     style: StyleType = Field(
         default="Futuristic",
@@ -136,7 +159,9 @@ class PresentationResponse(BaseModel):
         description="Tổng số lượng slide",
     )
     slides: List[Slide] = Field(
-        description="Danh sách các slide theo đúng thứ tự"
+        min_length=1,
+        max_length=MAX_SLIDES_PER_PRESENTATION,
+        description="Danh sách các slide theo đúng thứ tự",
     )
     morph_strategy: Optional[str] = Field(
         default=None,
@@ -149,6 +174,7 @@ class GenerateRequest(BaseModel):
 
     prompt: str = Field(
         min_length=3,
+        max_length=4000,
         description="Mô tả nội dung ý tưởng cần tạo bài trình chiếu",
         examples=["Tạo bài thuyết trình Pitch Deck gọi vốn 1 triệu USD cho startup AI SaaS"],
     )
@@ -171,6 +197,12 @@ class GenerateRequest(BaseModel):
     )
     language: str = Field(
         default="vi",
+        max_length=10,
         description="Ngôn ngữ nội dung: 'vi' (Tiếng Việt) hoặc 'en' (Tiếng Anh)",
         examples=["vi"],
+    )
+    include_speaker_notes: bool = Field(
+        default=True,
+        description="Có sinh lời dẫn người thuyết trình (speaker notes) hay không",
+        examples=[True],
     )

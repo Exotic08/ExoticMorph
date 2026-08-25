@@ -1,20 +1,21 @@
 "use client";
 
-import React, { useEffect, useState } from "react";
-import { 
-  Sparkles, 
-  Cpu, 
-  Layers, 
-  FileCode, 
-  CheckCircle2, 
-  Loader2 
+import React, { useEffect, useRef, useState } from "react";
+import {
+  Sparkles,
+  Cpu,
+  Layers,
+  FileCode,
+  CheckCircle2,
+  Loader2
 } from "lucide-react";
 import { GenerationProgressStep } from "@/types";
 
-interface LoadingProgressProps {
-  progressPercentage?: number;
-  currentStepIndex?: number;
-}
+/**
+ * Props progressPercentage/currentStepIndex của bản cũ là props CHẾT (khai báo
+ * nhưng không bao giờ đọc) — đã xóa để API component trung thực.
+ */
+type LoadingProgressProps = Record<string, never>;
 
 const STEPS_DATA: Omit<GenerationProgressStep, "completed" | "current">[] = [
   {
@@ -44,32 +45,40 @@ const STEPS_DATA: Omit<GenerationProgressStep, "completed" | "current">[] = [
 ];
 
 export const LoadingProgress: React.FC<LoadingProgressProps> = () => {
-  const [activeStep, setActiveStep] = useState(0);
   const [percent, setPercent] = useState(10);
+  // Giữ interval trong ref để chủ động dừng hẳn khi đã đạt mốc 98% (bản cũ
+  // để interval chạy vĩnh viễn trong suốt thời gian chờ -> tốn CPU vô ích).
+  const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   useEffect(() => {
-    // Dynamic simulation of progress increments
-    const interval = setInterval(() => {
+    // Mô phỏng tiến độ tăng dần (UI progress giả trong lúc Backend xử lý).
+    // Lưu ý: updater PHẢI thuần (pure) — bản cũ gọi setActiveStep() ngay bên
+    // trong setPercent() là anti-pattern: React StrictMode double-invoke
+    // updater sẽ gây hiệu ứng phụ chồng chéo. Bước hiện tại được suy ra từ
+    // percent lúc render thay vì lưu 2 state song song.
+    intervalRef.current = setInterval(() => {
       setPercent((prev) => {
-        if (prev < 30) {
-          setActiveStep(0);
-          return prev + 2;
-        } else if (prev < 65) {
-          setActiveStep(1);
-          return prev + 2.5;
-        } else if (prev < 90) {
-          setActiveStep(2);
-          return prev + 2;
-        } else if (prev < 98) {
-          setActiveStep(3);
-          return prev + 0.5;
-        }
-        return 98;
+        if (prev >= 98) return prev;
+        const step = prev < 30 ? 2 : prev < 65 ? 2.5 : prev < 90 ? 2 : 0.5;
+        return Math.min(98, prev + step);
       });
     }, 70);
 
-    return () => clearInterval(interval);
+    return () => {
+      if (intervalRef.current) clearInterval(intervalRef.current);
+    };
   }, []);
+
+  // Dừng hẳn interval khi tiến độ đã chạm trần 98%.
+  useEffect(() => {
+    if (percent >= 98 && intervalRef.current) {
+      clearInterval(intervalRef.current);
+      intervalRef.current = null;
+    }
+  }, [percent]);
+
+  // Suy ra bước đang chạy từ % (single source of truth).
+  const activeStep = percent < 30 ? 0 : percent < 65 ? 1 : percent < 90 ? 2 : 3;
 
   const getStepIcon = (index: number) => {
     switch (index) {

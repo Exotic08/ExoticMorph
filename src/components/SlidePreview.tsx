@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useRef } from "react";
 import { 
   Download, 
   RotateCcw, 
@@ -27,6 +27,9 @@ interface SlidePreviewProps {
   onReset: () => void;
   onEditPrompt: () => void;
   onDownloadRequest?: () => Promise<void>;
+  /** Báo lỗi tải file lên trang cha để hiển thị ErrorNotification thân thiện
+   *  (thay cho alert() của bản cũ — alert chặn luồng UI và không style được). */
+  onError?: (message: string) => void;
 }
 
 export const SlidePreview: React.FC<SlidePreviewProps> = ({
@@ -36,12 +39,22 @@ export const SlidePreview: React.FC<SlidePreviewProps> = ({
   onReset,
   onEditPrompt,
   onDownloadRequest,
+  onError,
 }) => {
   const [currentSlideIndex, setCurrentSlideIndex] = useState(0);
   const [isPlayingMorph, setIsPlayingMorph] = useState(false);
   const [showMorphDetails, setShowMorphDetails] = useState(false);
   const [isDownloading, setIsDownloading] = useState(false);
   const [downloadSuccess, setDownloadSuccess] = useState(false);
+
+  // Ref giữ timer reset trạng thái "Đã tải về" — được cleanup khi unmount
+  // để tránh gọi setState trên component đã bị gỡ (memory leak).
+  const successTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => {
+    return () => {
+      if (successTimerRef.current) clearTimeout(successTimerRef.current);
+    };
+  }, []);
 
   // Hiệu ứng pháo hoa khi sinh slide thành công
   useEffect(() => {
@@ -51,20 +64,22 @@ export const SlidePreview: React.FC<SlidePreviewProps> = ({
       origin: { y: 0.6 },
       colors: ["#8B5CF6", "#EC4899", "#06B6D4", "#10B981"],
     });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // Vòng lặp trình chiếu tự động hiệu ứng Morph
+  // Vòng lặp trình chiếu tự động hiệu ứng Morph.
+  // FIX: dùng ReturnType<typeof setInterval> (bản cũ ghi NodeJS.Timeout —
+  // sai môi trường browser); chỉ chạy khi thực sự có slide.
   useEffect(() => {
-    let interval: NodeJS.Timeout;
-    if (isPlayingMorph) {
-      interval = setInterval(() => {
-        setCurrentSlideIndex((prev) => (prev + 1) % data.slides.length);
-      }, 3500);
-    }
+    if (!isPlayingMorph || data.slides.length === 0) return;
+    const interval = setInterval(() => {
+      setCurrentSlideIndex((prev) => (prev + 1) % data.slides.length);
+    }, 3500);
     return () => clearInterval(interval);
   }, [isPlayingMorph, data.slides.length]);
 
-  const currentSlide: SlideItem = data.slides[currentSlideIndex] || data.slides[0];
+  const currentSlide: SlideItem | undefined =
+    data.slides[currentSlideIndex] ?? data.slides[0];
 
   const handlePrev = () => {
     setCurrentSlideIndex((prev) => (prev > 0 ? prev - 1 : data.slides.length - 1));
@@ -84,26 +99,37 @@ export const SlidePreview: React.FC<SlidePreviewProps> = ({
         downloadBlob(cachedBlob, filename);
         setDownloadSuccess(true);
       } else if (onDownloadRequest) {
-        // Gọi API tải file mới từ backend
+        // Gọi API tải file mới từ backend (hàm cha tự download ngay khi có blob)
         await onDownloadRequest();
         setDownloadSuccess(true);
       } else {
-        // Fallback tạo blob
-        const fileContent = `PK\x03\x04 [ExoticMorph AI Generated PPTX - ${data.presentationTitle}]`;
-        const fallbackBlob = new Blob([fileContent], {
-          type: "application/vnd.openxmlformats-officedocument.presentationml.presentation",
-        });
-        downloadBlob(fallbackBlob, `${data.presentationTitle.toLowerCase().replace(/\s+/g, "_")}_morph.pptx`);
-        setDownloadSuccess(true);
+        console.warn("Không có blob cache và không có callback tải file từ backend.");
       }
     } catch (err) {
       console.error("Lỗi khi tải file:", err);
-      alert("Đã xảy ra lỗi khi tải file PPTX. Vui lòng thử lại!");
+      // Thông báo lỗi thân thiện qua ErrorNotification thay vì alert() chặn UI
+      onError?.(
+        err instanceof Error
+          ? `Lỗi khi tải file PPTX: ${err.message}`
+          : "Đã xảy ra lỗi khi tải file PPTX. Vui lòng thử lại!"
+      );
     } finally {
       setIsDownloading(false);
-      setTimeout(() => setDownloadSuccess(false), 4000);
+      // Hủy timer cũ (nếu có) trước khi đặt timer mới, tránh chồng chéo setState
+      if (successTimerRef.current) clearTimeout(successTimerRef.current);
+      successTimerRef.current = setTimeout(() => setDownloadSuccess(false), 4000);
     }
   };
+
+  // Guard phòng thủ: backend đảm bảo >= 1 slide, nhưng nếu dữ liệu rỗng thì
+  // render graceful thay vì crash ở currentSlide.morphDescription bên dưới.
+  if (!currentSlide) {
+    return (
+      <div className="w-full max-w-5xl mx-auto p-6 rounded-2xl glass-panel text-center text-slate-400 text-sm">
+        Chưa có dữ liệu slide để hiển thị.
+      </div>
+    );
+  }
 
   return (
     <div className="w-full max-w-5xl mx-auto space-y-6">
