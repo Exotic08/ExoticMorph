@@ -3,7 +3,7 @@
 Module dựng slide thuyết trình bằng python-pptx và tích hợp bộ xử lý XML Morph.
 """
 
-from typing import Optional, Tuple
+from typing import Optional
 from pptx import Presentation
 from pptx.util import Inches, Pt
 from pptx.enum.shapes import MSO_SHAPE
@@ -118,7 +118,8 @@ def create_demo_morph_presentation(
       - Nội dung chữ: "Slide 2: End".
       - Morph ID: `!!DemoBox` (Trùng ID để PowerPoint tự động nội suy
       chuyển động).
-      - Kích hoạt Transition Morph: `<p:transition><p:morph/></p:transition>`.
+      - Kích hoạt Transition Morph: `<p:transition><p:morph/></p:transition>`
+      (được chèn SAU thẻ <p:clrMapOvr> — đúng thứ tự CT_Slide chuẩn ECMA-376).
 
   :param output_path: Đường dẫn tệp .pptx cần lưu.
   :return: Đường dẫn tệp đã lưu thành công.
@@ -285,7 +286,10 @@ def create_demo_morph_presentation(
           "Slide Transition:",
           '<p:transition spd="med"><p:morph option="byObject"/></p:transition>',
       ),
-      ("Schema Conformance:", "Chèn trước thẻ <p:clrMapOvr> hợp lệ ISO/IEC"),
+      (
+          "Schema Conformance:",
+          "Chèn transition sau <p:clrMapOvr>, trước <p:timing> (đúng CT_Slide ISO/IEC)",
+      ),
       (
           "Interpolation:",
           "Nội suy đồng thời Position, Size, Color Fill & Font Size",

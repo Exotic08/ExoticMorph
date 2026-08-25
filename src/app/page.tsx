@@ -1,29 +1,36 @@
 "use client";
 
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useCallback } from "react";
 import { Header } from "@/components/Header";
 import { PromptInput } from "@/components/PromptInput";
 import { QuickPrompts } from "@/components/QuickPrompts";
 import { LoadingProgress } from "@/components/LoadingProgress";
 import { SlidePreview } from "@/components/SlidePreview";
 import { ErrorNotification } from "@/components/ErrorNotification";
-import { 
-  PromptFormData, 
-  GenerationStatus, 
-  SlidePreviewData, 
-  QuickPrompt 
+import {
+  PromptFormData,
+  GenerationStatus,
+  SlidePreviewData,
+  QuickPrompt,
+  BackendPresentation,
+  BackendHealthStatus,
 } from "@/types";
-import { 
-  generatePresentationPreview, 
+import {
+  generatePresentationPreview,
+  buildPptxFromPresentation,
   generatePresentationPptx,
-  checkBackendHealth 
+  checkBackendHealth,
+  toErrorMessage,
+  type GeneratePptxResult,
 } from "@/lib/api";
+import { downloadBlob } from "@/lib/download";
 import { Flame, Activity } from "lucide-react";
 
 export default function HomePage() {
   // Quản lý trạng thái
   const [status, setStatus] = useState<GenerationStatus>("idle");
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [downloadError, setDownloadError] = useState<string | null>(null);
   const [formData, setFormData] = useState<PromptFormData>({
     topic: "",
     slideCount: 5,
@@ -31,101 +38,148 @@ export default function HomePage() {
     style: "Futuristic",
     includeSpeakerNotes: true,
   });
-  
+
   // Dữ liệu xem trước và file PPTX nhị phân
   const [previewData, setPreviewData] = useState<SlidePreviewData | null>(null);
+  // JSON gốc từ backend — dùng để biên dịch lại .pptx mà KHÔNG gọi LLM lần 2.
+  const [sourcePresentation, setSourcePresentation] = useState<BackendPresentation | null>(null);
   const [cachedBlob, setCachedBlob] = useState<Blob | null>(null);
   const [downloadFilename, setDownloadFilename] = useState<string>("exoticmorph_presentation.pptx");
-  const [backendStatus, setBackendStatus] = useState<{ online: boolean; provider?: string }>({
+  const [backendStatus, setBackendStatus] = useState<BackendHealthStatus>({
     online: false,
   });
 
-  // Kiểm tra sức khỏe Backend khi ứng dụng khởi động
+  // Kiểm tra sức khỏe Backend khi ứng dụng khởi động.
+  // Cờ `cancelled` chống setState sau khi component unmount.
   useEffect(() => {
-    checkBackendHealth().then((res) => {
-      setBackendStatus({ online: res.online, provider: res.provider });
-    });
+    let cancelled = false;
+    checkBackendHealth()
+      .then((res) => {
+        if (!cancelled) setBackendStatus(res);
+      })
+      .catch(() => {
+        if (!cancelled) setBackendStatus({ online: false });
+      });
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   /**
-   * Gọi API Thật sang FastAPI Backend để sinh Slide Preview và tệp PPTX
+   * Gọi API Backend để sinh Slide Preview và tệp PPTX.
+   *
+   * Luồng tối ưu (đợt rework): LLM chỉ được gọi MỘT LẦN qua /generate-json;
+   * file .pptx được biên dịch từ chính JSON đó qua /build-pptx => file tải về
+   * luôn khớp 100% với Preview. Bản cũ gọi LLM 2 lần (generate-json rồi generate)
+   * nên preview và file có thể khác nhau do temperature > 0.
    */
-  const handleSubmit = async () => {
-    if (!formData.topic.trim()) return;
+  const handleSubmit = useCallback(async () => {
+    if (formData.topic.trim().length < 3) return;
 
     setStatus("generating");
     setErrorMessage(null);
+    setDownloadError(null);
     setCachedBlob(null);
+    setSourcePresentation(null);
 
     try {
-      // 1. Gọi API sinh Preview JSON
-      const previewResult = await generatePresentationPreview(formData);
-      setPreviewData(previewResult);
+      // 1. Gọi LLM sinh cấu trúc JSON (lần duy nhất)
+      const { preview, source } = await generatePresentationPreview(formData);
+      setPreviewData(preview);
+      setSourcePresentation(source);
 
-      // 2. Tải song song hoặc chuẩn bị sẵn binary PPTX Blob
+      // 2. Biên dịch file PPTX từ JSON vừa có (không tốn thêm lượt gọi LLM).
+      //    Nếu bước này fail thì Preview vẫn dùng được — nút tải sẽ thử lại.
       try {
-        const pptxResult = await generatePresentationPptx(formData);
+        const pptxResult = await buildPptxFromPresentation(source);
         setCachedBlob(pptxResult.blob);
         setDownloadFilename(pptxResult.filename);
       } catch (blobErr) {
-        console.warn("Chưa tạo được blob trước, sẽ tạo khi bấm nút tải:", blobErr);
+        console.warn("Chưa tạo được blob PPTX, sẽ thử lại khi người dùng bấm tải:", blobErr);
       }
 
       // 3. Hoàn tất thành công
       setStatus("completed");
-    } catch (err: any) {
+    } catch (err: unknown) {
       console.error("Lỗi khi kết nối FastAPI Backend:", err);
-      const msg =
-        err?.message ||
-        "Không thể kết nối đến máy chủ ExoticMorph Backend. Vui lòng kiểm tra cổng 8000.";
-      setErrorMessage(msg);
+      setErrorMessage(
+        toErrorMessage(
+          err,
+          "Không thể kết nối đến máy chủ ExoticMorph Backend. Vui lòng kiểm tra lại kết nối."
+        )
+      );
       setStatus("error");
     }
-  };
+  }, [formData]);
 
   /**
-   * Xử lý tải file trực tiếp từ nút trong SlidePreview (nếu chưa có cache blob)
+   * Xử lý tải file khi người dùng bấm nút tải mà chưa có blob trong cache.
+   *
+   * FIX đợt rework: bản cũ fetch blob xong KHÔNG tự kích hoạt download — người
+   * dùng phải bấm nút 2 lần mới nhận được file. Giờ file được tải NGAY khi có blob.
    */
-  const handleDownloadRequest = async () => {
+  const handleDownloadRequest = useCallback(async (): Promise<void> => {
+    setDownloadError(null);
     try {
-      const pptxResult = await generatePresentationPptx(formData);
+      let pptxResult: GeneratePptxResult;
+
+      if (sourcePresentation) {
+        // Ưu tiên biên dịch từ JSON nguồn (không gọi LLM, kết quả khớp preview)
+        try {
+          pptxResult = await buildPptxFromPresentation(sourcePresentation);
+        } catch (buildErr) {
+          // Fallback cuối cùng: endpoint /generate (gọi LLM lại từ đầu)
+          console.warn("build-pptx thất bại, chuyển sang /generate:", buildErr);
+          pptxResult = await generatePresentationPptx(formData);
+        }
+      } else {
+        pptxResult = await generatePresentationPptx(formData);
+      }
+
       setCachedBlob(pptxResult.blob);
       setDownloadFilename(pptxResult.filename);
-    } catch (err: any) {
-      alert(`Lỗi khi tải file PPTX: ${err.message || err}`);
-      throw err;
+      // Kích hoạt tải xuống ngay khi có dữ liệu (không cần bấm nút lần 2)
+      downloadBlob(pptxResult.blob, pptxResult.filename);
+    } catch (err: unknown) {
+      const message = toErrorMessage(err, "Không thể tải file PPTX. Vui lòng thử lại!");
+      setDownloadError(message);
+      // Re-throw để SlidePreview biết là đã fail và không hiển thị "Đã tải về"
+      throw err instanceof Error ? err : new Error(message);
     }
-  };
+  }, [formData, sourcePresentation]);
 
   /**
    * Chọn prompt gợi ý nhanh
    */
-  const handleSelectQuickPrompt = (item: QuickPrompt) => {
-    setFormData({
-      ...formData,
+  const handleSelectQuickPrompt = useCallback((item: QuickPrompt) => {
+    setFormData((prev) => ({
+      ...prev,
       topic: item.promptText,
       slideCount: item.recommendedCount,
       style: item.recommendedStyle,
-    });
-  };
+    }));
+  }, []);
 
   /**
    * Đặt lại trạng thái ban đầu
    */
-  const handleReset = () => {
+  const handleReset = useCallback(() => {
     setStatus("idle");
     setErrorMessage(null);
+    setDownloadError(null);
     setPreviewData(null);
+    setSourcePresentation(null);
     setCachedBlob(null);
-  };
+  }, []);
 
   /**
    * Sửa lại prompt hiện tại
    */
-  const handleEditPrompt = () => {
+  const handleEditPrompt = useCallback(() => {
     setStatus("idle");
     setErrorMessage(null);
-  };
+    setDownloadError(null);
+  }, []);
 
   const isGenerating = status === "generating";
 
@@ -142,6 +196,15 @@ export default function HomePage() {
             message={errorMessage}
             onRetry={handleSubmit}
             onDismiss={() => setStatus("idle")}
+          />
+        )}
+
+        {/* Lỗi riêng của luồng tải file (hiện khi đang ở màn hình kết quả) */}
+        {status === "completed" && downloadError && (
+          <ErrorNotification
+            message={downloadError}
+            onRetry={() => void handleDownloadRequest()}
+            onDismiss={() => setDownloadError(null)}
           />
         )}
 
@@ -226,6 +289,7 @@ export default function HomePage() {
               onReset={handleReset}
               onEditPrompt={handleEditPrompt}
               onDownloadRequest={handleDownloadRequest}
+              onError={setDownloadError}
             />
           </div>
         )}

@@ -1,7 +1,8 @@
 "use client";
 
 import React from "react";
-import { AlertTriangle, RefreshCw, X, ServerCrash } from "lucide-react";
+import { RefreshCw, X, ServerCrash } from "lucide-react";
+import { API_BASE_URL } from "@/lib/api";
 
 interface ErrorNotificationProps {
   message: string;
@@ -41,8 +42,8 @@ export const ErrorNotification: React.FC<ErrorNotificationProps> = ({
               </p>
 
               <div className="text-[11px] text-slate-400 pt-1">
-                Gợi ý: Hãy đảm bảo máy chủ FastAPI Backend đang chạy tại cổng{" "}
-                <code className="text-purple-300 font-mono">http://localhost:8000</code>{" "}
+                Gợi ý: Hãy đảm bảo máy chủ FastAPI Backend đang hoạt động tại{" "}
+                <code className="text-purple-300 font-mono break-all">{API_BASE_URL}</code>{" "}
                 hoặc kiểm tra lại cấu hình API Key trong file <code className="text-purple-300 font-mono">.env</code>.
               </div>
             </div>
