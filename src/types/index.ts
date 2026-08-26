@@ -12,7 +12,17 @@ export type SlideStyleOption = "Minimal" | "Futuristic" | "Corporate" | "Creativ
  */
 export interface BackendSlideElement {
   id: string;
-  type: "text" | "shape" | "card" | "metric" | "heading" | "badge";
+  type:
+    | "text"
+    | "shape"
+    | "card"
+    | "metric"
+    | "heading"
+    | "badge"
+    | "kicker"
+    | "footer"
+    | "connector"
+    | "accent";
   content: string;
   label?: string | null;
   sub_text?: string | null;
@@ -26,15 +36,20 @@ export interface BackendSlideElement {
   font_size?: number | null;
   shape_type?: string | null;
   border_color?: string | null;
+  accent_color?: string | null;
+  step?: number | null;
+  align?: "left" | "center" | "right" | null;
 }
 
 export interface BackendSlide {
   slide_number: number;
   title: string;
+  section?: string;
   subtitle?: string | null;
   speaker_notes?: string | null;
   morph_description?: string | null;
   bg_color?: string | null;
+  layout_type?: "hero" | "compare" | "features" | "roadmap" | "grid";
   elements: BackendSlideElement[];
 }
 
@@ -86,6 +101,14 @@ export interface MetricItem {
   isPositive?: boolean;
 }
 
+/** Một thẻ nội dung hai phần: thông điệp cụ thể + đoạn diễn giải chi tiết. */
+export interface PreviewCard {
+  title: string;
+  body: string;
+  accentColor?: string;
+  step?: number;
+}
+
 export interface MorphAnchor {
   id: string;
   name: string;
@@ -103,7 +126,9 @@ export interface SlideItem {
   title: string;
   subtitle?: string;
   badge?: string;
+  section?: string;
   bulletPoints?: string[];
+  cards?: PreviewCard[];
   layoutType: "title-hero" | "split-feature" | "metrics-grid" | "timeline-step" | "cards-compare" | "conclusion";
   morphDescription: string;
   morphAnchors: MorphAnchor[];

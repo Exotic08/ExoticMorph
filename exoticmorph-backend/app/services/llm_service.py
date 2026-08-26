@@ -25,7 +25,7 @@ from app.schemas.slide_schema import (
     LLMOutput,
     PresentationResponse,
 )
-from app.services.layout_engine import compute_layout
+from app.services.layout_engine import CARD_ACCENTS, compute_layout
 
 logger = logging.getLogger("exoticmorph.llm")
 
@@ -53,21 +53,46 @@ T = TypeVar("T")
 # lỗi Few-Shot Contamination (ví dụ: "Hệ Mặt Trời" cứ lặp lại).
 
 _FEW_SHOT_EXAMPLE_1 = json.dumps({
-    "topic": "Hệ Mặt Trời",
-    "slides": [{
-        "slide_number": 1,
-        "slide_title": "Kiến trúc Hệ Mặt Trời",
-        "cards": [
-            {"morph_id": "sun", "title": "Mặt Trời chi phối quỹ đạo", "description": "Mặt Trời chứa khoảng 99,86 phần trăm khối lượng toàn hệ, chủ yếu là hydro và heli. Nhiệt độ lõi xấp xỉ 15 triệu độ C, nơi phản ứng nhiệt hạch biến hydro thành heli và phát ra năng lượng duy trì sự sống trên Trái Đất.", "color_theme": "#8B5CF6", "order": 0},
-            {"morph_id": "planets", "title": "Bốn hành tinh đá", "description": "Thủy, Kim, Trái Đất và Hỏa nằm ở vùng trong, có bề mặt rắn và mật độ lớn. Trái Đất nổi bật với nước lỏng, còn Sao Hỏa lưu giữ dấu vết lòng sông cổ, cung cấp manh mối về khí hậu từng ấm và ẩm hơn.", "color_theme": "#161926", "order": 1},
-            {"morph_id": "belt", "title": "Đai tiểu hành tinh giữa", "description": "Đai tiểu hành tinh nằm giữa Sao Hỏa và Sao Mộc, là phần còn sót lại của vật chất hình thành hành tinh nhưng không kết tụ được. Sao Mộc với khối lượng lớn đã khuấy nhiễu quỹ đạo, hạn chế quá trình tạo một hành tinh mới.", "color_theme": "#1E2235", "order": 2}
-        ]
-    }]
+    "topic": "[CHỦ ĐỀ CỦA NGƯỜI DÙNG]",
+    "slides": [
+        {
+            "slide_number": 1,
+            "section": "VẤN ĐỀ",
+            "slide_title": "[THÔNG ĐIỆP CỤ THỂ: vấn đề hoặc luận điểm + con số/mốc thời gian]",
+            "cards": [
+                {"morph_id": "card_1", "title": "[THÔNG ĐIỆP CỤ THỂ 1]", "description": "[2-4 câu: dữ kiện định lượng hoặc mốc thời gian, ví dụ thực tế và quan hệ nhân quả của nó với chủ đề.]", "color_theme": "#8B5CF6", "order": 0},
+                {"morph_id": "card_2", "title": "[THÔNG ĐIỆP CỤ THỂ 2]", "description": "[2-4 câu: cơ chế hoặc luận điểm riêng biệt, kèm bằng chứng cụ thể và ý nghĩa thực tiễn.]", "color_theme": "#10B981", "order": 1},
+                {"morph_id": "card_3", "title": "[THÔNG ĐIỆP CỤ THỂ 3]", "description": "[2-4 câu: ví dụ hoặc số liệu liên quan trực tiếp, giải thích rõ bản chất vấn đề.]", "color_theme": "#06B6D4", "order": 2}
+            ]
+        },
+        {
+            "slide_number": 2,
+            "section": "NGUYÊN NHÂN",
+            "slide_title": "[THÔNG ĐIỆP CỤ THỂ KẾ TIẾP — mở rộng từ slide 1]",
+            "cards": [
+                {"morph_id": "card_1", "title": "[MỞ RỘNG THÔNG ĐIỆP 1]", "description": "[2-4 câu: phân tích nguyên nhân gốc rễ, dữ kiện và hệ quả cụ thể.]", "color_theme": "#8B5CF6", "order": 0},
+                {"morph_id": "card_2", "title": "[MỞ RỘNG THÔNG ĐIỆP 2]", "description": "[2-4 câu: rào cản và cơ chế vận hành, kèm ví dụ minh hoạ.]", "color_theme": "#10B981", "order": 1},
+                {"morph_id": "card_3", "title": "[MỞ RỘNG THÔNG ĐIỆP 3]", "description": "[2-4 câu: luận điểm bổ sung có dữ kiện và quan hệ nhân quả rõ ràng.]", "color_theme": "#06B6D4", "order": 2}
+            ]
+        }
+    ]
 }, ensure_ascii=False, indent=2)
 
 _FEW_SHOT_EXAMPLE_2 = json.dumps({
-    "topic": "[CHỦ ĐỀ THỰC TẾ KHÁC DO NGƯỜI DÙNG CUNG CẤP]",
-    "slides": [{"slide_number": 1, "slide_title": "[KẾT LUẬN CỤ THỂ VỀ CHỦ ĐỀ]", "cards": [{"morph_id": "evidence", "title": "[THUẬT NGỮ CHUYÊN NGÀNH]", "description": "[30-50 từ: giải thích cơ chế hoặc luận điểm cụ thể, kèm một con số, mốc thời gian, ví dụ thực tế và ý nghĩa của dữ kiện đối với chủ đề người dùng yêu cầu.]", "color_theme": "#2563EB", "order": 0}]}]
+    "topic": "[CHỦ ĐỀ KHÁC CỦA NGƯỜI DÙNG]",
+    "slides": [
+        {
+            "slide_number": 1,
+            "section": "HÀNH ĐỘNG",
+            "slide_title": "[THÔNG ĐIỆP CỤ THỂ: lộ trình hoặc kế hoạch hành động]",
+            "cards": [
+                {"morph_id": "card_1", "title": "[BƯỚC 1 — thông điệp cụ thể]", "description": "[2-4 câu: hành động đầu tiên, người chịu trách nhiệm và mốc thời gian.]", "color_theme": "#8B5CF6", "order": 0},
+                {"morph_id": "card_2", "title": "[BƯỚC 2 — thông điệp cụ thể]", "description": "[2-4 câu: bước tiếp theo, nguồn lực cần và tiêu chí hoàn thành.]", "color_theme": "#10B981", "order": 1},
+                {"morph_id": "card_3", "title": "[BƯỚC 3 — thông điệp cụ thể]", "description": "[2-4 câu: triển khai thí điểm và cách đo lường kết quả.]", "color_theme": "#06B6D4", "order": 2},
+                {"morph_id": "card_4", "title": "[BƯỚC 4 — thông điệp cụ thể]", "description": "[2-4 câu: đánh giá, học hỏi và nhân rộng mô hình thành công.]", "color_theme": "#EC4899", "order": 3}
+            ]
+        }
+    ]
 }, ensure_ascii=False, indent=2)
 
 
@@ -77,103 +102,92 @@ _FEW_SHOT_EXAMPLE_2 = json.dumps({
 # ⚠️ KHÔNG dùng f-string cho phần JSON examples để tránh xung đột ngoặc nhọn
 # với Python format. Examples được gắn vào bằng .replace() ở cuối, an toàn 100%.
 
-SYSTEM_PROMPT_TEMPLATE = """Bạn là "Master Presentation Architect" — kiến trúc sư trình chiếu hàng đầu thế giới, chuyên thiết kế nội dung bài thuyết trình PowerPoint có hiệu ứng Morph.
-
-🚫 STRICT BAN LIST — TUYỆT ĐỐI KHÔNG DÙNG trong slide_title, title hoặc description:
-"Giới thiệu chủ đề", "Điểm nổi bật", "Cấu trúc bài", "Yếu tố cốt lõi", "Dữ liệu & Bằng chứng", "Giải pháp/Công nghệ", "Tác động chính", "Chỉ số đo lường" (kể cả biến thể viết hoa, dịch tương đương hoặc tiêu đề không nói rõ đối tượng).
-
-DEEP CONTENT RULES:
-- Mỗi card phải nói về một thực thể, cơ chế, sự kiện hoặc luận điểm cụ thể của USER TOPIC; không viết lời dẫn, mục lục hay placeholder.
-- title tự nhiên 3-6 từ và phải có từ khóa/thực thể của chủ đề. description đúng 30-50 từ, tối thiểu một dữ kiện định lượng, mốc thời gian, đơn vị, ví dụ hoặc quan hệ nhân quả. Không bịa số liệu: nếu chưa chắc, nêu rõ phạm vi/điều kiện hoặc dùng kiến thức nền đã biết.
-- Tự phát hiện ngôn ngữ của yêu cầu; nếu người dùng viết tiếng Việt, viết tiếng Việt tự nhiên, không dịch từng chữ từ tiếng Anh.
+SYSTEM_PROMPT_TEMPLATE = """Bạn là "Executive Presentation Architect" — kiến trúc sư nội dung trình chiếu hàng đầu, chuyên viết nội dung PowerPoint có hiệu ứng Morph đạt chuẩn Apple Keynote / McKinsey: sâu, thực tế, mỗi tiêu đề là một thông điệp.
 
 ══════════════════════════════════════════════════════════════════════
 🚨 QUY TẮC QUAN TRỌNG NHẤT — TOPIC ADHERENCE (KHÔNG ĐƯỢC VI PHẠM) 🚨
 ══════════════════════════════════════════════════════════════════════
 
-1. **BẠN PHẢI BÁM SÁT 100% CHỦ ĐỀ NGƯỜI DÙNG YÊU CẦU** — đó là nội dung
-   nằm giữa hai dòng "=== USER TOPIC TO GENERATE ===" và
-   "=== END OF USER TOPIC ===" trong tin nhắn user bên dưới.
-2. **KHÔNG ĐƯỢC BỊA NỘI DUNG CHUNG CHUNG / LẶP NỘI DUNG TỪ VÍ DỤ** —
-   các ví dụ JSON chỉ dùng để minh hoẠ CẤU TRÚC, không phải nội dung mẫu.
-3. **KHÔNG ĐƯỢC copy bất kỳ cụm từ / số liệu / tên sản phẩm / chủ đề nào
-   từ ví dụ vào kết quả cuối cùng.** Ví dụ nói "[NỘI DUNG VÍ DỤ]", bạn phải
-   thay bằng nội dung thật, liên quan trực tiếp đến USER TOPIC.
-4. Mỗi `title` và `description` phải chứa thông tin CHUYÊN BIỆT cho chủ đề người
-   dùng yêu cầu (số liệu cụ thể, thuật ngữ ngành, ví dụ liên quan trực tiếp),
-   không phải những câu chung chung như "Giới thiệu tổng quan về sản phẩm"
-   hay "Các điểm nổi bật của giải pháp" khi không nói rõ là gì.
-5. `topic` ở kết quả cuối cùng PHẢI là chính xác chủ đề người dùng nhập
-   (hoặc tiêu đề ngắn gọn tóm tắt đúng chủ đề đó), KHÔNG PHẢI "Ví dụ",
-   "Giới thiệu", hay tên một sản phẩm bất kỳ.
+1. **BÁM SÁT 100% CHỦ ĐỀ NGƯỜI DÙNG** — nội dung nằm giữa hai dòng
+   "=== USER TOPIC TO GENERATE ===" và "=== END OF USER TOPIC ===" bên dưới.
+2. **KHÔNG bịa nội dung chung chung, KHÔNG copy placeholder/số liệu từ ví dụ.**
+   Mọi chữ trong ngoặc vuông [NHƯ THẾ NÀY] phải được thay bằng nội dung THẬT
+   liên quan trực tiếp đến USER TOPIC.
+3. `topic` PHẢI là đúng chủ đề người dùng nhập (hoặc tóm tắt đúng chủ đề đó).
 
 ══════════════════════════════════════════════════════════════════════
-NHIỆM VỤ CHI TIẾT
+🚫 STRICT BAN LIST — TUYỆT ĐỐI KHÔNG DÙNG (title, slide_title, section):
 ══════════════════════════════════════════════════════════════════════
-Nhận yêu cầu từ người dùng (chủ đề, số lượng slide, phong cách, ngôn ngữ)
-và trả về DUY NHẤT một JSON object theo đúng schema `LLMOutput` dưới đây.
+"Giới thiệu chủ đề", "Điểm nổi bật", "Cấu trúc bài", "Yếu tố cốt lõi", "Tổng quan",
+"Phân tích chuyên sâu", "Dữ liệu & Bằng chứng", "Giải pháp/Công nghệ", "Tác động chính",
+"Chỉ số đo lường", "Đặc điểm", "Thành phần", "Lộ trình triển khai", "Kết luận"
+(kể cả biến thể viết hoa, dịch tương đương, hoặc tiêu đề không nói rõ đối tượng).
 
 ══════════════════════════════════════════════════════════════════════
-CÁC QUY TẮC KHÁC (STRUCTURAL RULES)
+NỘI DUNG SÂU & THỰC TẾ (DEEP CONTENT RULES)
 ══════════════════════════════════════════════════════════════════════
 
-A. **CHỈ NỘI DUNG, KHÔNG HÌNH HỌC**:
-   - KHÔNG trả về `x`, `y`, `width`, `height` ở bất kỳ đâu. Python sẽ tự tính.
-   - Bạn CHỈ quyết định: `title`, `description`, `color_theme`, `morph_id`, `order`.
+A. **MỖI TIÊU ĐỀ LÀ MỘT THÔNG ĐIỆP CỤ THỂ**, không phải nhãn danh mục.
+   - ĐÚNG:  "Doanh thu tăng 35% nhờ mở rộng thị trường".
+   - SAI:   "Tình hình doanh thu".
+   - `title` dài 2-10 từ, chứa thực thể/thuật ngữ của chủ đề và thường kèm một
+     con số, mốc thời gian hoặc kết quả cụ thể.
 
-B. **BẢO TOÀN MORPH_ID (CHO HIỆU ỨNG MORPH POWERPOINT)**:
-   - `morph_id` là mã định danh DUY NHẤT cho một đối tượng nội dung.
-   - GIỮ NGUYÊN `morph_id` của một thẻ giữa slide N và slide N+1 nếu thẻ đó
-     biểu diễn cùng một nội dung (tiếp nối/mở rộng/thu nhỏ).
-   - Thẻ hoàn toàn mới ở slide sau phải có morph_id MỚI (chưa từng xuất hiện).
-   - Dùng morph_id ngắn, gạch dưới, không dấu/khoảng trắng/ký tự đặc biệt:
-     vd "hero_card", "kpi_revenue", "plan_apac", "col_1".
+B. **CẤU TRÚC 2 PHẦN CHO MỖI THẺ**: (1) `title` = thông điệp ngắn gọn, cô đọng;
+   (2) `description` = đoạn diễn giải chi tiết 2-4 câu (20-60 từ) giải thích RÕ
+   bản chất: dữ kiện định lượng, mốc thời gian, đơn vị, ví dụ hoặc quan hệ nhân quả.
+   KHÔNG bịa số: nếu chưa chắc, nêu rõ phạm vi/điều kiện hoặc dùng kiến thức nền.
 
-C. **CẤU TRÚC MỖI SLIDE**:
-   - Mỗi slide có: `slide_number` (tăng tuần tự từ 1), `slide_title`, `cards`.
-   - Mỗi card có: `morph_id`, `title` (ngắn 1-12 từ, in đậm), `description` (1-5 câu
-     giải thích, CÓ NỘI DUNG CỤ THỂ), `color_theme` (mã hex vd "#1E2235"),
-     `order` (thứ tự từ 0, tăng dần từ trái sang phải).
-   - Mỗi slide có 1-4 cards.
+C. **MẠCH KỂ CHUYỆN (NARRATIVE ARC)** — các slide liền mạch theo đúng thứ tự:
+   VẤN ĐỀ → NGUYÊN NHÂN GỐC RỄ → GIẢI PHÁP THỰC THI → KẾT QUẢ KỲ VỌNG → HÀNH ĐỘNG.
+   Slide sau tiếp nối luận điểm slide trước, không lặp lại, không rời rạc.
+   Ghi `section` là nhãn mục VIẾT HOA ngắn gọn thể hiện vị trí trong mạch trên
+   (vd "VẤN ĐỀ", "NGUYÊN NHÂN", "GIẢI PHÁP", "KẾT QUẢ", "HÀNH ĐỘNG").
 
-D. **SỐ LƯỢNG SLIDE**: Phải trả về ĐÚNG BẰNG số slide người dùng yêu cầu
-   (không hơn, không kém).
+D. **SỐ THẺ LINH HOẠT THEO Ý**: 1 thẻ (tuyên bố lớn), 2 thẻ (so sánh hai bên),
+   3 thẻ (3 đặc điểm), 4 thẻ (4 bước lộ trình). Chọn số thẻ TỰ NHIÊN nhất với ý
+   đang trình bày; mỗi slide 1-4 thẻ.
 
-E. **MÀU SẮC (theo phong cách)**:
-   - Futuristic: accent tím (#8B5CF6), cyan (#06B6D4), hồng (#EC4899) trên nền tối.
-   - Minimal:    accent indigo (#6366F1), sky (#38BDF8), emerald (#10B981).
-   - Corporate:  accent xanh (#2563EB/#3A86FF), lá (#10B981), vàng (#F59E0B).
-   - Creative:   accent tím hồng (#D946EF), cam (#F59E0B), cyan (#06B6D4).
-   - Thẻ chính (điểm nhấn) dùng màu accent sáng; thẻ phụ dùng màu nền card tối.
-   - Mọi `color_theme` phải là mã hex 6 ký tự có dấu #.
+══════════════════════════════════════════════════════════════════════
+CÁC QUY TẮC CẤU TRÚC (STRUCTURAL RULES)
+══════════════════════════════════════════════════════════════════════
 
-F. **NGÔN NGỮ**: Toàn bộ nội dung (topic, slide_title, title, description) phải
-   bằng ngôn ngữ người dùng yêu cầu ("vi" → Tiếng Việt, "en" → English).
-
-G. **ĐỊNH DẠNG**: Trả về DUY NHẤT một JSON object hợp lệ. KHÔNG bọc trong
-   ```json code fence```, KHÔNG thêm văn bản giải thích trước/sau JSON.
+1. **CHỈ NỘI DUNG, KHÔNG HÌNH HỌC**: KHÔNG trả `x/y/width/height`. Python tự tính.
+   Bạn chỉ quyết định: `section`, `slide_title`, và với mỗi card: `morph_id`,
+   `title`, `description`, `color_theme`, `order`.
+2. **MORPH_ID**: ngắn, gạch dưới, không dấu/khoảng trắng (vd "hero_card",
+   "kpi_revenue", "card_1"). GIỮ NGUYÊN morph_id giữa slide N và N+1 cho cùng
+   một đối tượng nội dung (để PowerPoint Morph nội suy mượt mà); thẻ mới dùng id mới.
+3. **MÀU color_theme**: là màu ACCENT tươi, bão hòa của thẻ (mã hex 6 ký tự có #).
+   - Futuristic: #8B5CF6 (tím), #06B6D4 (cyan), #EC4899 (hồng), #10B981 (ngọc bảo).
+   - Minimal:    #6366F1 (indigo), #38BDF8 (sky), #10B981 (ngọc bảo), #C9A227 (vàng đồng).
+   - Corporate:  #C9A227 (vàng đồng), #10B981 (ngọc bảo), #3A86FF (xanh), #B08D2E (đồng).
+   - Creative:   #EC4899 (hồng), #F59E0B (cam), #06B6D4 (cyan), #8B5CF6 (tím).
+   Thẻ đầu tiên (điểm nhấn) dùng màu accent chủ đạo; các thẻ sau đổi màu xen kẽ.
+4. **NGÔN NGỮ**: toàn bộ nội dung theo ngôn ngữ yêu cầu ("vi" → tiếng Việt tự nhiên,
+   "en" → English). Không dịch từng chữ.
+5. **SỐ LƯỢNG SLIDE**: trả ĐÚNG số slide người dùng yêu cầu (không hơn, không kém).
+6. **ĐỊNH DẠNG**: trả DUY NHẤT một JSON object hợp lệ, không code fence, không giải thích.
 
 ══════════════════════════════════════════════════════════════════════
 [VÍ DỤ MINH HOẠ CẤU TRÚC — NỘI DUNG LÀ PLACEHOLDER, KHÔNG ĐƯỢC SAO CHÉP]
 ══════════════════════════════════════════════════════════════════════
 
-VÍ DỤ 1 — 2 slide, 3 cards/slide, morph_id được giữ nguyên giữa 2 slide.
-(LƯU Ý: đây là VÍ DỤ CẤU TRÚC. Bạn phải thay [CHỮ TRONG NGOẶC VUÔNG] bằng
-nội dung thật về CHỦ ĐỀ của người dùng, KHÔNG sao chép placeholder):
+VÍ DỤ 1 — 2 slide, 3 thẻ/slide, morph_id giữ nguyên giữa 2 slide.
+(Thay [CHỮ TRONG NGOẶC VUÔNG] bằng nội dung THẬT về USER TOPIC):
 
 __EXAMPLE_1__
 
 ---
-VÍ DỤ 2 — 2 slide với 1 card hero và 4 cards (minh hoạ linh hoạt số lượng cards).
-(Tiếp tục lưu ý: [CHỮ TRONG NGOẶC VUÔNG] là placeholder — KHÔNG SAO CHÉP):
+VÍ DỤ 2 — 1 slide dạng lộ trình 4 bước (4 thẻ), minh hoạ số thẻ linh hoạt:
 
 __EXAMPLE_2__
 
 ══════════════════════════════════════════════════════════════════════
 HÃY BẮT ĐẦU
 ══════════════════════════════════════════════════════════════════════
-Đọc kỹ phần "=== USER TOPIC TO GENERATE ===" trong tin nhắn user bên dưới,
-tạo nội dung 100% bám sát chủ đề đó theo cấu trúc JSON đã minh hoạ.
+Đọc kỹ "=== USER TOPIC TO GENERATE ===", viết nội dung 100% bám sát chủ đề đó,
+theo đúng mạch kể chuyện và cấu trúc JSON đã minh hoạ.
 """
 
 # Gắn abstract examples vào SYSTEM_PROMPT (không dùng f-string cho examples
@@ -548,16 +562,16 @@ def _provider_ready(provider: str) -> bool:
 # FALLBACK GENERATOR (Heuristic — KHÔNG BAO GIỜ fail)
 # =============================================================================
 # ContentCard bắt buộc:
-#   title       : 3-6 từ, 3-80 ký tự
-#   description : 30-50 từ, 150-450 ký tự
+#   title       : 2-10 từ, 3-120 ký tự (MỘT THÔNG ĐIỆP CỤ THỂ, không nhãn chung chung)
+#   description : 20-60 từ, 120-520 ký tự (2-4 câu diễn giải có dữ kiện thực tế)
 # Bản cũ ghép nguyên prompt vào title (vd. "Bối cảnh tạo bài thuyết trình về
 # solar system") → Pydantic ValueError → HTTP 502. Helper bên dưới luôn kẹp
 # đúng số từ/ký tự trước khi tạo card.
 
-_TITLE_WORD_MIN, _TITLE_WORD_MAX = 3, 6
-_DESC_WORD_MIN, _DESC_WORD_MAX = 30, 50
-_TITLE_CHAR_MAX = 80
-_DESC_CHAR_MIN, _DESC_CHAR_MAX = 150, 450
+_TITLE_WORD_MIN, _TITLE_WORD_MAX = 2, 10
+_DESC_WORD_MIN, _DESC_WORD_MAX = 20, 60
+_TITLE_CHAR_MAX = 120
+_DESC_CHAR_MIN, _DESC_CHAR_MAX = 120, 520
 
 # Cụm mở đầu kiểu "tạo bài thuyết trình về X" — bỏ đi để lấy đúng chủ đề X.
 _PROMPT_NOISE = re.compile(
@@ -571,7 +585,7 @@ _PROMPT_NOISE = re.compile(
 )
 
 _SAFE_TITLE = "Chủ đề then chốt"
-# 38 từ / ~220 ký tự — nằm giữa 30-50 từ và 150-450 ký tự.
+# 38 từ / ~220 ký tự — nằm giữa 20-60 từ và 120-520 ký tự.
 _SAFE_DESCRIPTION = (
     "Phần này phân tích bối cảnh cơ chế vận hành và dữ kiện cụ thể của chủ đề "
     "để người xem nắm vấn đề cốt lõi. Nội dung nêu phạm vi áp dụng mối liên hệ "
@@ -598,15 +612,30 @@ def _extract_topic_core(prompt: str) -> str:
     return core
 
 
-def _topic_phrase(prompt: str, max_words: int = 3) -> str:
-    """Cụm 1-3 từ dùng trong title card (để tổng title không vượt 6 từ)."""
-    words = _split_words(_extract_topic_core(prompt))[:max_words]
-    return " ".join(words) if words else "chủ đề chính"
+_TOPIC_STOPWORDS = {"gọi", "về", "cho", "của", "với", "of", "for", "about", "on", "the", "a", "an"}
+
+
+def _topic_phrase(prompt: str, max_words: int = 4) -> str:
+    """Cụm 1-4 từ dùng trong title card.
+
+    Dừng sớm khi gặp token bắt đầu bằng chữ số (con số/%) để giữ cụm danh từ
+    tự nhiên (vd "Báo cáo doanh thu" thay vì "Báo cáo doanh thu quý 3"), rồi
+    bỏ các từ nối đuôi (gọi/về/cho...).
+    """
+    words = _split_words(_extract_topic_core(prompt))
+    out: list = []
+    for word in words[:max_words]:
+        if word[0].isdigit():
+            break
+        out.append(word)
+    while out and out[-1].lower() in _TOPIC_STOPWORDS:
+        out.pop()
+    return " ".join(out) if out else "chủ đề chính"
 
 
 def _fit_title(text: str) -> str:
-    """Kẹp title đúng 3-6 từ và ≤ 80 ký tự."""
-    pads = ["cốt", "lõi", "then", "chốt"]
+    """Kẹp title đúng 2-10 từ và ≤ 120 ký tự."""
+    pads = ["then", "chốt", "cốt", "lõi"]
     words = _split_words(text)
     i = 0
     while len(words) < _TITLE_WORD_MIN:
@@ -625,7 +654,7 @@ def _fit_title(text: str) -> str:
 
 
 def _fit_description(text: str) -> str:
-    """Kẹp description đúng 30-50 từ và 150-450 ký tự."""
+    """Kẹp description đúng 20-60 từ và 120-520 ký tự."""
     filler = _split_words(_DESC_FILLER)
     words = _split_words(text)
     i = 0
@@ -653,6 +682,42 @@ def _fit_description(text: str) -> str:
     return result
 
 
+# ==============================================================================
+# TRÍCH XUẤT DỮ KIỆN TỪ PROMPT (cho Fallback Heuristic)
+# ==============================================================================
+# Fallback không có LLM nên không thể "biết" số liệu ngành. Nhưng nếu chính
+# prompt của người dùng CHỨA dữ kiện (vd "$50B", "12.5 triệu USD", "35%",
+# "2025", "99.999%"), ta tái sử dụng chúng để tiêu đề/đoạn mô tả trở nên CỤ THỂ
+# thay vì chung chung — đúng tinh thần "mọi tiêu đề là một thông điệp".
+
+_MONEY_RE = re.compile(
+    r"\$\s?\d[\d.,]*\s?(?:B|M|K|billion|million|trillion|tỷ|triệu)?"
+    r"|\d[\d.,]*\s?(?:triệu|tỷ|nghìn|ngàn)\s?(?:USD|VND|đô|đồng)?",
+    re.IGNORECASE,
+)
+_PERCENT_RE = re.compile(r"\d+(?:[.,]\d+)?\s?%")
+_YEAR_RE = re.compile(r"(?:19|20)\d{2}")
+
+
+def _extract_prompt_facts(prompt: str) -> "dict[str, str]":
+    """Trích dữ kiện định lượng đầu tiên tìm thấy trong prompt.
+
+    Trả dict gồm 'money', 'percent', 'year' (chuỗi rỗng nếu không có).
+    """
+    text = prompt or ""
+    facts = {"money": "", "percent": "", "year": ""}
+    m = _MONEY_RE.search(text)
+    if m:
+        facts["money"] = m.group(0).strip()
+    m = _PERCENT_RE.search(text)
+    if m:
+        facts["percent"] = m.group(0).strip()
+    m = _YEAR_RE.search(text)
+    if m:
+        facts["year"] = m.group(0)
+    return facts
+
+
 def _make_card(
     *,
     morph_id: str,
@@ -661,7 +726,7 @@ def _make_card(
     color_theme: str,
     order: int,
 ):
-    """Tạo ContentCard luôn vượt qua Pydantic (title 3-6 từ, desc 30-50 từ)."""
+    """Tạo ContentCard luôn vượt qua Pydantic (title 2-10 từ, desc 20-60 từ)."""
     from app.schemas.slide_schema import ContentCard
 
     safe_id = re.sub(r"[^a-zA-Z0-9_]+", "_", (morph_id or "card")).strip("_") or "card"
@@ -706,235 +771,363 @@ def generate_fallback_presentation(req: GenerateRequest) -> PresentationResponse
 
 
 def _build_fallback_presentation(req: GenerateRequest) -> PresentationResponse:
+    """Sinh bài trình chiếu dự phòng theo MẠCH KỂ CHUYỆN chuẩn diễn giả:
+
+        Vấn đề → Nguyên nhân gốc rễ → Giải pháp thực thi → Kết quả kỳ vọng → Hành động.
+
+    Không có LLM nên fallback không thể "biết" số liệu ngành, nhưng:
+      - Tái sử dụng dữ kiện có SẴN trong prompt (số tiền, %, năm) để tiêu đề
+        trở thành thông điệp cụ thể (không bịa thêm số).
+      - Tiêu đề là thông điệp hành động, không dùng nhãn sáo rỗng.
+      - Mỗi thẻ gồm tiêu đề cụ thể + đoạn diễn giải 2-3 câu có quan hệ nhân quả.
+    """
     from app.schemas.slide_schema import RawSlideContent
 
     num_slides = max(1, min(req.num_slides, 20))
-    accents = {
-        "Futuristic": ["#8B5CF6", "#06B6D4", "#EC4899", "#161926", "#1E2235"],
-        "Minimal":    ["#6366F1", "#38BDF8", "#10B981", "#1E293B", "#334155"],
-        "Corporate":  ["#3A86FF", "#10B981", "#F59E0B", "#1C2541", "#2563EB"],
-        "Creative":   ["#D946EF", "#F59E0B", "#06B6D4", "#241438", "#341D4E"],
-    }.get(req.style, ["#8B5CF6", "#06B6D4", "#EC4899", "#161926", "#1E2235"])
+    vi = (req.language or "vi").lower().startswith("vi")
+    accents = CARD_ACCENTS.get(req.style, CARD_ACCENTS["Futuristic"])
 
     topic_core = _extract_topic_core(req.prompt)
     topic_short = _topic_phrase(req.prompt, 3)
     topic_title = _clip_slide_title(topic_core)
+    facts = _extract_prompt_facts(req.prompt)
+    money, pct, year = facts["money"], facts["percent"], facts["year"]
+
+    # ---- Cụm mô tả dùng chung (vi / en) ----
+    if money:
+        scale_vi = f"Quy mô {money} cho thấy dư địa còn rất lớn. "
+        scale_en = f"A scale of {money} signals plenty of headroom. "
+    else:
+        scale_vi = "Các tổ chức chậm thích ứng đang tụt lại phía sau. "
+        scale_en = "Organisations that adapt slowly are falling behind. "
+
+    def _card(morph_id: str, title: str, desc: str, accent_idx: int, order: int):
+        return _make_card(
+            morph_id=morph_id,
+            title=title,
+            description=desc,
+            color_theme=accents[accent_idx % len(accents)],
+            order=order,
+        )
 
     raw_slides: list = []
 
-    raw_slides.append(RawSlideContent(
-        slide_number=1,
-        slide_title=_clip_slide_title(f"Tổng Quan: {topic_title}"),
-        cards=[
-            _make_card(
-                morph_id="hero_card",
-                title=f"Bối cảnh {topic_short}",
-                description=(
-                    f"Tổng quan về {topic_core}: các vấn đề cốt lõi, bối cảnh và lý do "
-                    "chủ đề này quan trọng. Toàn bộ bài trình chiếu đi sâu vào khía cạnh "
-                    "liên quan trực tiếp, kèm dữ kiện cụ thể và mối liên hệ nhân quả rõ ràng."
-                ),
-                color_theme=accents[0],
-                order=0,
-            ),
-            _make_card(
-                morph_id="col_1",
-                title=f"Đặc điểm {topic_short}",
-                description=(
-                    f"Những khía cạnh giá trị và lợi ích đáng chú ý nhất liên quan trực tiếp "
-                    f"đến {topic_core}, được phân tích từ nhiều góc nhìn chuyên ngành. Mỗi "
-                    "đặc điểm đi kèm ví dụ minh hoạ và dữ kiện cụ thể giúp nắm bản chất vấn đề."
-                ),
-                color_theme=accents[3],
-                order=1,
-            ),
-            _make_card(
-                morph_id="col_2",
-                title=f"Thành phần {topic_short}",
-                description=(
-                    f"Cấu trúc và các thành phần chính tạo nên {topic_core}, gồm yếu tố then "
-                    "chốt, mối liên hệ giữa các phần tử và vai trò của từng thành phần trong "
-                    "tổng thể. Các slide tiếp theo lần lượt đi vào phân tích chuyên sâu."
-                ),
-                color_theme=accents[3],
-                order=2,
-            ),
-        ],
-    ))
-
-    if num_slides >= 2:
+    if vi:
+        # --------------------------------------------------------------
+        # 1) VẤN ĐỀ — đặt vấn đề bằng một thông điệp cụ thể
+        # --------------------------------------------------------------
+        if money:
+            s1_title = f"Cơ hội {money} từ {topic_short} đang mở ra"
+        elif pct:
+            s1_title = f"Tăng trưởng {pct} đang đặt {topic_short} lên tuyến đầu"
+        else:
+            s1_title = f"Vì sao {topic_short} trở thành ưu tiên chiến lược số một"
         raw_slides.append(RawSlideContent(
-            slide_number=2,
-            slide_title=_clip_slide_title(f"Phân Tích Chuyên Sâu: {topic_title}"),
+            slide_number=1,
+            section="",
+            slide_title=_clip_slide_title(s1_title),
             cards=[
-                _make_card(
-                    morph_id="hero_card",
-                    title=f"Cơ chế {topic_short}",
-                    description=(
-                        f"Đi sâu vào thành phần nguyên nhân và yếu tố quan trọng nhất làm nên "
-                        f"{topic_core}. Phân tích từng thành phần cấu tạo nên tổng thể và giải "
-                        "thích vì sao đây là điểm then chốt cần ưu tiên trong kế hoạch triển khai."
-                    ),
-                    color_theme=accents[0],
-                    order=0,
-                ),
-                _make_card(
-                    morph_id="col_1",
-                    title=f"Số liệu {topic_short}",
-                    description=(
-                        f"Các số liệu nghiên cứu điển hình và thống kê thực tế liên quan trực "
-                        f"tiếp đến {topic_core}, giúp minh chứng luận điểm chính. Mỗi con số có "
-                        "phạm vi áp dụng cụ thể để đảm bảo tính chính xác và đáng tin cậy."
-                    ),
-                    color_theme=accents[1],
-                    order=1,
-                ),
-                _make_card(
-                    morph_id="col_2",
-                    title=f"Cách tiếp cận {topic_short}",
-                    description=(
-                        f"Cách tiếp cận công cụ và phương pháp cụ thể có thể áp dụng để giải "
-                        f"quyết vấn đề hoặc khai thác cơ hội từ {topic_core}. Mỗi phương pháp "
-                        "đi kèm hướng dẫn thực hiện và lưu ý quan trọng để đạt hiệu quả tối ưu."
-                    ),
-                    color_theme=accents[2],
-                    order=2,
-                ),
+                _card("card_1", f"Nhu cầu {topic_short} đang tăng tốc",
+                      f"Nhu cầu xoay quanh {topic_core} đang gia tăng ở mọi khâu vận hành. "
+                      f"{scale_vi}Chỉ những đơn vị chuyển động sớm mới giữ được lợi thế dẫn đầu.",
+                      0, 0),
+                _card("card_2", "Điểm nghẽn đang kìm hãm tiến độ",
+                      f"Ba điểm nghẽn phổ biến là thiếu dữ liệu tin cậy, quy trình rời rạc và năng lực "
+                      f"chuyên môn phân tán. Chúng đẩy chi phí lên cao trong khi tốc độ ra quyết định "
+                      f"chậm lại. Gỡ sớm thì mọi kế hoạch mới kịp tiến độ.",
+                      1, 1),
+                _card("card_3", "Cái giá của việc chần chừ",
+                      f"Mỗi quý trì hoãn đồng nghĩa chi phí cơ hội và doanh thu bỏ lỡ ngày càng lớn. "
+                      f"Đối thủ đã bắt đầu thử nghiệm và thu hút khách hàng mục tiêu. Thời điểm hành "
+                      f"động tốt nhất chính là hiện tại.",
+                      2, 2),
             ],
         ))
 
-    if num_slides >= 3:
-        raw_slides.append(RawSlideContent(
-            slide_number=3,
-            slide_title="Kết Quả và Lợi Ích Kỳ Vọng",
-            cards=[
-                _make_card(
-                    morph_id="hero_card",
-                    title=f"Ảnh hưởng {topic_short}",
-                    description=(
-                        f"Kết quả và lợi ích lớn nhất khi áp dụng thành công các giải pháp về "
-                        f"{topic_core}, gồm tác động tích cực lên hiệu quả vận hành và vị thế "
-                        "cạnh tranh. Mỗi lợi ích được nêu rõ điều kiện để thấy giá trị mang lại."
-                    ),
-                    color_theme=accents[0],
-                    order=0,
-                ),
-                _make_card(
-                    morph_id="kpi_roi",
-                    title=f"Thước đo {topic_short}",
-                    description=(
-                        f"Các chỉ số đo lường hiệu quả cụ thể để theo dõi tiến độ triển khai "
-                        f"{topic_core} và đánh giá mức độ thành công sau khi hoàn thành. Mỗi "
-                        "chỉ số có nguồn dữ liệu và ngưỡng mục tiêu rõ ràng giúp đánh giá khách quan."
-                    ),
-                    color_theme=accents[4],
-                    order=1,
-                ),
-            ],
-        ))
-
-    if num_slides >= 4:
-        raw_slides.append(RawSlideContent(
-            slide_number=4,
-            slide_title="Lộ Trình Triển Khai",
-            cards=[
-                _make_card(
-                    morph_id="stage_1",
-                    title="Giai đoạn một chuẩn bị",
-                    description=(
-                        f"Giai đoạn khởi tạo liên quan đến {topic_core}, gồm thu thập yêu cầu "
-                        "chi tiết từ các bên liên quan, phân tích hiện trạng, thiết kế kế hoạch "
-                        "triển khai và chuẩn bị nguồn lực về nhân sự công nghệ cùng ngân sách ban đầu."
-                    ),
-                    color_theme=accents[0],
-                    order=0,
-                ),
-                _make_card(
-                    morph_id="stage_2",
-                    title="Giai đoạn hai thử nghiệm",
-                    description=(
-                        f"Giai đoạn thí điểm trên phạm vi hạn chế để kiểm chứng tính khả thi "
-                        f"của {topic_core}. Thu thập phản hồi từ người dùng và các bên liên quan, "
-                        "phân tích dữ liệu thí điểm để tinh chỉnh quy trình trước khi nhân rộng."
-                    ),
-                    color_theme=accents[3],
-                    order=1,
-                ),
-                _make_card(
-                    morph_id="stage_3",
-                    title="Giai đoạn ba mở rộng",
-                    description=(
-                        f"Giai đoạn triển khai trên quy mô lớn theo kế hoạch đã tinh chỉnh từ "
-                        f"thử nghiệm {topic_core}. Tối ưu hiệu năng dựa trên dữ liệu vận hành "
-                        "thực tế, xử lý vấn đề phát sinh và tích hợp với các hệ thống liên quan."
-                    ),
-                    color_theme=accents[3],
-                    order=2,
-                ),
-                _make_card(
-                    morph_id="stage_4",
-                    title="Giai đoạn bốn vận hành",
-                    description=(
-                        f"Giai đoạn đưa giải pháp {topic_core} vào vận hành ổn định trong môi "
-                        "trường thực tế. Giám sát liên tục các chỉ số hiệu suất, xử lý sự cố "
-                        "phát sinh và cải tiến liên tục dựa trên dữ liệu cùng phản hồi người dùng."
-                    ),
-                    color_theme=accents[1],
-                    order=3,
-                ),
-            ],
-        ))
-
-    if num_slides >= 5:
-        raw_slides.append(RawSlideContent(
-            slide_number=5,
-            slide_title="Kết Luận và Bước Tiếp Theo",
-            cards=[
-                _make_card(
-                    morph_id="hero_card",
-                    title=f"Hành trình {topic_short}",
-                    description=(
-                        f"Tóm tắt thông điệp cốt lõi về {topic_core} và kêu gọi hành động cụ thể "
-                        "để đưa ý tưởng thành hiện thực. Hãy xác định bước tiếp theo, phân công "
-                        "trách nhiệm rõ ràng và bắt đầu triển khai ngay trong chu kỳ làm việc tới."
-                    ),
-                    color_theme=accents[0],
-                    order=0,
-                ),
-            ],
-        ))
-
-    if num_slides > 5:
-        for s_idx in range(6, num_slides + 1):
-            extra_n = s_idx - 5
+        # --------------------------------------------------------------
+        # 2) NGUYÊN NHÂN GỐC RỄ
+        # --------------------------------------------------------------
+        if num_slides >= 2:
             raw_slides.append(RawSlideContent(
-                slide_number=s_idx,
-                slide_title=_clip_slide_title(f"Chuyên Đề Mở Rộng {extra_n}: {topic_title}"),
+                slide_number=2,
+                section="",
+                slide_title=_clip_slide_title(f"Ba nguyên nhân gốc rễ khiến {topic_short} chững lại"),
                 cards=[
-                    _make_card(
-                        morph_id=f"extra_{s_idx}_1",
-                        title=_fit_title(f"Phân tích sâu {extra_n}A {topic_short}"),
-                        description=(
-                            f"Đào sâu khía cạnh kịch bản và thách thức đặc thù liên quan trực "
-                            f"tiếp đến {topic_core} chưa đề cập ở các slide trước. Phân tích "
-                            "nguyên nhân hậu quả và yếu tố ảnh hưởng để hiểu rõ bản chất vấn đề."
-                        ),
-                        color_theme=accents[3],
-                        order=0,
-                    ),
-                    _make_card(
-                        morph_id=f"extra_{s_idx}_2",
-                        title=_fit_title(f"Giải pháp sâu {extra_n}B {topic_short}"),
-                        description=(
-                            f"Đề xuất giải pháp chi tiết các bước thực hiện và bài học kinh nghiệm "
-                            f"rút ra cho {topic_core}. Mỗi đề xuất có phân tích ưu nhược điểm và "
-                            "điều kiện áp dụng rõ ràng để chuyển từ ý tưởng sang hành động cụ thể."
-                        ),
-                        color_theme=accents[4],
-                        order=1,
-                    ),
+                    _card("card_1", "Nguyên nhân trực tiếp phía sau",
+                          f"Vấn đề lớn nhất của {topic_core} thường bắt nguồn từ dữ liệu phân mảnh, "
+                          f"khiến các quyết định dựa trên cảm tính thay vì bằng chứng. Khi không đo "
+                          f"được hiện trạng, tổ chức khó biết nên ưu tiên gỡ nút thắt nào trước.",
+                          0, 0),
+                    _card("card_2", "Rào cản hệ thống khó gỡ",
+                          f"Năng lực và nguồn lực cho {topic_short} bị chia nhỏ giữa nhiều bộ phận, "
+                          f"thiếu một đầu mối chịu trách nhiệm cuối. Quy trình phê duyệt nhiều tầng "
+                          f"kéo dài chu kỳ triển khai và triệt tiêu động lực của nhóm thực thi.",
+                          1, 1),
+                    _card("card_3", "Ngộ nhận phổ biến cần tránh",
+                          f"Nhiều tổ chức nhầm tưởng chỉ cần thêm ngân sách là đủ, trong khi gốc rễ "
+                          f"lại nằm ở cách vận hành. Đầu tư công nghệ mà không thay đổi quy trình "
+                          f"chỉ khuếch đại sự lãng phí hiện có.",
+                          2, 2),
                 ],
             ))
+
+        # --------------------------------------------------------------
+        # 3) GIẢI PHÁP THỰC THI
+        # --------------------------------------------------------------
+        if num_slides >= 3:
+            raw_slides.append(RawSlideContent(
+                slide_number=3,
+                section="",
+                slide_title=_clip_slide_title(f"Giải pháp khả thi cho {topic_short} trong 90 ngày"),
+                cards=[
+                    _card("card_1", "Trụ cột một: nền tảng dữ liệu",
+                          f"Hợp nhất dữ liệu về {topic_core} vào một nguồn duy nhất, chuẩn hoá định "
+                          f"nghĩa và chỉ số. Bảng điều hành theo thời gian thực giúp mọi bên nhìn "
+                          f"chung một bức tranh và phát hiện bất thường sớm.",
+                          0, 0),
+                    _card("card_2", "Trụ cột hai: quy trình chuẩn hoá",
+                          f"Thiết kế lại quy trình theo chuẩn tinh gọn, giao rõ đầu mối chịu trách "
+                          f"nhiệm ở từng khâu. Cắt bớt tầng phê duyệt trung gian để rút ngắn thời "
+                          f"gian từ ý tưởng đến triển khai.",
+                          1, 1),
+                    _card("card_3", "Trụ cột ba: đo lường liên tục",
+                          f"Đặt bộ chỉ số dẫn dắt cho {topic_short} và họp định kỳ để đối chiếu tiến "
+                          f"độ. Mọi điều chỉnh dựa trên dữ liệu thực tế, không theo cảm tính, giúp "
+                          f"tổ chức học nhanh và xoay trục kịp thời.",
+                          2, 2),
+                ],
+            ))
+
+        # --------------------------------------------------------------
+        # 4) KẾT QUẢ KỲ VỌNG
+        # --------------------------------------------------------------
+        if num_slides >= 4:
+            target = f"trong {year}" if year else "trong 4 quý tới"
+            raw_slides.append(RawSlideContent(
+                slide_number=4,
+                section="",
+                slide_title=_clip_slide_title(f"Những kết quả đo được {target} sau khi triển khai {topic_short}"),
+                cards=[
+                    _card("card_1", f"Mục tiêu định lượng {target}",
+                          f"Đặt mục tiêu cụ thể cho {topic_core} {('(bám sát mốc ' + pct + ')') if pct else ''} "
+                          f"và theo dõi theo tuần. Mục tiêu phải đo được, gắn trách nhiệm cá nhân và có "
+                          f"ngưỡng cảnh báo khi chệch hướng để kịp thời can thiệp.",
+                          0, 0),
+                    _card("card_2", "Lợi ích lan tỏa sang các mảng",
+                          f"Thành công ở {topic_short} kéo theo hiệu quả dây chuyền: giảm chi phí vận "
+                          f"hành, tăng tốc độ quyết định và củng cố vị thế cạnh tranh. Bài học thu được "
+                          f"có thể nhân bản sang các bộ phận khác.",
+                          1, 1),
+                    _card("card_3", "Rủi ro và cách kiểm soát",
+                          f"Rủi ro lớn nhất là triển khai nửa vời rồi dừng giữa chừng. Cần cơ chế giám "
+                          f"sát độc lập, quỹ dự phòng cho tình huống phát sinh và cam kết của lãnh đạo "
+                          f"để giữ nhịp triển khai đến cùng.",
+                          2, 2),
+                ],
+            ))
+
+        # --------------------------------------------------------------
+        # 5) HÀNH ĐỘNG TIẾP THEO — 4 bước lộ trình (roadmap)
+        # --------------------------------------------------------------
+        if num_slides >= 5:
+            raw_slides.append(RawSlideContent(
+                slide_number=5,
+                section="",
+                slide_title=_clip_slide_title(f"Bốn bước hành động cho {topic_short} trong 30 ngày tới"),
+                cards=[
+                    _card("card_1", "Chốt mục tiêu và người chịu trách nhiệm",
+                          f"Ghi rõ kết quả kỳ vọng của {topic_core} trong 30 ngày và phân công một đầu "
+                          f"mối duy nhất. Mục tiêu phải cụ thể, có mốc thời gian và được cả nhóm cam kết.",
+                          0, 0),
+                    _card("card_2", "Phân bổ ngân sách và nguồn lực",
+                          f"Dành nguồn lực nhân sự và ngân sách tối thiểu cho giai đoạn đầu. Ưu tiên "
+                          f"tuyển đúng người có năng lực chuyên môn để tránh lãng phí chi phí học lại.",
+                          1, 1),
+                    _card("card_3", "Chạy thí điểm trong phạm vi hẹp",
+                          f"Triển khai thí điểm cho {topic_short} trên một phân khúc hoặc quy trình nhỏ "
+                          f"trong 2-4 tuần. Thu thập dữ liệu và phản hồi để kiểm chứng giả định trước "
+                          f"khi mở rộng quy mô.",
+                          2, 2),
+                    _card("card_4", "Đo lường, học và nhân rộng",
+                          f"Đánh giá kết quả thí điểm bằng chỉ số đã đặt ra, giữ lại điều hiệu quả và "
+                          f"cắt bỏ phần thừa. Nhân rộng mô hình thành công ra toàn tổ chức theo lộ trình "
+                          f"đã duyệt.",
+                          3, 3),
+                ],
+            ))
+
+        if num_slides > 5:
+            for s_idx in range(6, num_slides + 1):
+                extra_n = s_idx - 5
+                raw_slides.append(RawSlideContent(
+                    slide_number=s_idx,
+                    section="",
+                    slide_title=_clip_slide_title(f"Góc nhìn mở rộng {extra_n} cho {topic_short}"),
+                    cards=[
+                        _card(f"extra_{s_idx}_1", f"Kịch bản {extra_n}: yếu tố ảnh hưởng",
+                              f"Phân tích kịch bản và yếu tố ảnh hưởng đặc thù của {topic_core} chưa "
+                              f"được đề cập ở các phần trước. Xét cả biến số nội tại lẫn ngoại cảnh để "
+                              f"có góc nhìn toàn diện hơn.",
+                              0, 0),
+                        _card(f"extra_{s_idx}_2", f"Đề xuất {extra_n}: hướng xử lý",
+                              f"Đề xuất cách xử lý cụ thể cho kịch bản trên, kèm ưu nhược điểm và điều "
+                              f"kiện áp dụng. Chuyển từ phân tích sang hành động bằng bước thực hiện rõ "
+                              f"ràng cho {topic_short}.",
+                              1, 1),
+                    ],
+                ))
+    else:
+        # --------------------------------------------------------------
+        # ENGLISH narrative arc
+        # --------------------------------------------------------------
+        if money:
+            s1_title = f"A {money} opportunity in {topic_short} is opening up"
+        elif pct:
+            s1_title = f"{pct} growth puts {topic_short} on the front line"
+        else:
+            s1_title = f"Why {topic_short} is now the number-one strategic priority"
+        raw_slides.append(RawSlideContent(
+            slide_number=1,
+            section="",
+            slide_title=_clip_slide_title(s1_title),
+            cards=[
+                _card("card_1", f"Demand for {topic_short} is accelerating",
+                      f"Demand around {topic_core} is rising across every part of operations. "
+                      f"{scale_en}Only early movers will hold the lead.",
+                      0, 0),
+                _card("card_2", "The bottleneck holding back progress",
+                      f"Three recurring bottlenecks are unreliable data, fragmented processes and "
+                      f"scattered expertise. They raise cost while slowing decision speed. Removing "
+                      f"them early keeps every plan on schedule.",
+                      1, 1),
+                _card("card_3", "The cost of waiting",
+                      f"Every quarter of delay means larger opportunity cost and lost revenue. "
+                      f"Competitors are already testing and winning target customers. The best time "
+                      f"to act is now.",
+                      2, 2),
+            ],
+        ))
+
+        if num_slides >= 2:
+            raw_slides.append(RawSlideContent(
+                slide_number=2,
+                section="",
+                slide_title=_clip_slide_title(f"Three root causes behind the slowdown in {topic_short}"),
+                cards=[
+                    _card("card_1", "The direct root cause",
+                          f"The biggest issue for {topic_core} is fragmented data, which forces "
+                          f"decisions to be made on intuition instead of evidence. Without a clear "
+                          f"baseline it is hard to know which constraint to fix first.",
+                          0, 0),
+                    _card("card_2", "Systemic barriers",
+                          f"Capability and resources for {topic_short} are split across many teams "
+                          f"with no single owner. Multi-layer approvals stretch delivery cycles and "
+                          f"drain the team's momentum.",
+                          1, 1),
+                    _card("card_3", "The myth to avoid",
+                          f"Many organisations assume more budget is enough, when the real issue is "
+                          f"how the work runs. Buying technology without changing process only "
+                          f"amplifies existing waste.",
+                          2, 2),
+                ],
+            ))
+
+        if num_slides >= 3:
+            raw_slides.append(RawSlideContent(
+                slide_number=3,
+                section="",
+                slide_title=_clip_slide_title(f"A 90-day solution for {topic_short}"),
+                cards=[
+                    _card("card_1", "Pillar one: a data foundation",
+                          f"Consolidate data on {topic_core} into a single source with standardised "
+                          f"definitions and metrics. A real-time dashboard lets everyone read the same "
+                          f"picture and spot anomalies early.",
+                          0, 0),
+                    _card("card_2", "Pillar two: standardised process",
+                          f"Redesign the workflow to lean standards and assign a clear owner to each "
+                          f"step. Remove middle layers of approval to shorten the path from idea to "
+                          f"execution.",
+                          1, 1),
+                    _card("card_3", "Pillar three: continuous measurement",
+                          f"Define leading indicators for {topic_short} and review progress on a fixed "
+                          f"cadence. Every adjustment is based on real data, helping the organisation "
+                          f"learn fast and pivot in time.",
+                          2, 2),
+                ],
+            ))
+
+        if num_slides >= 4:
+            target = f"in {year}" if year else "within four quarters"
+            raw_slides.append(RawSlideContent(
+                slide_number=4,
+                section="",
+                slide_title=_clip_slide_title(f"Measurable results {target} after rolling out {topic_short}"),
+                cards=[
+                    _card("card_1", f"Quantified targets {target}",
+                          f"Set concrete goals for {topic_core} {('(tracking ' + pct + ')') if pct else ''} "
+                          f"and review them weekly. Targets must be measurable, tied to a named owner and "
+                          f"carry an alert threshold when they drift.",
+                          0, 0),
+                    _card("card_2", "Ripple benefits",
+                          f"Success in {topic_short} creates knock-on gains: lower operating cost, faster "
+                          f"decisions and a stronger competitive position. The lessons can be replicated "
+                          f"across other teams.",
+                          1, 1),
+                    _card("card_3", "Risks and how to control them",
+                          f"The biggest risk is a half-finished rollout. Keep independent oversight, a "
+                          f"contingency fund and visible leadership commitment to sustain momentum to "
+                          f"the end.",
+                          2, 2),
+                ],
+            ))
+
+        if num_slides >= 5:
+            raw_slides.append(RawSlideContent(
+                slide_number=5,
+                section="",
+                slide_title=_clip_slide_title(f"Four actions for {topic_short} in the next 30 days"),
+                cards=[
+                    _card("card_1", "Lock targets and a single owner",
+                          f"Write down the expected outcome for {topic_core} in 30 days and name one "
+                          f"accountable owner. The goal must be specific, time-boxed and committed by "
+                          f"the whole team.",
+                          0, 0),
+                    _card("card_2", "Allocate budget and people",
+                          f"Ring-fence the minimum people and budget for the first phase. Prioritise "
+                          f"hiring the right expertise to avoid paying twice for relearning.",
+                          1, 1),
+                    _card("card_3", "Run a small pilot",
+                          f"Pilot {topic_short} in one narrow segment or workflow for two to four weeks. "
+                          f"Gather data and feedback to validate assumptions before scaling.",
+                          2, 2),
+                    _card("card_4", "Measure, learn and scale",
+                          f"Review the pilot against the agreed metrics, keep what works and cut what "
+                          f"does not. Replicate the winning model across the organisation on an approved "
+                          f"plan.",
+                          3, 3),
+                ],
+            ))
+
+        if num_slides > 5:
+            for s_idx in range(6, num_slides + 1):
+                extra_n = s_idx - 5
+                raw_slides.append(RawSlideContent(
+                    slide_number=s_idx,
+                    section="",
+                    slide_title=_clip_slide_title(f"Extended angle {extra_n} for {topic_short}"),
+                    cards=[
+                        _card(f"extra_{s_idx}_1", f"Scenario {extra_n}: key factors",
+                              f"Examine scenarios and factors specific to {topic_core} not covered "
+                              f"earlier, weighing both internal variables and external forces for a "
+                              f"fuller view.",
+                              0, 0),
+                        _card(f"extra_{s_idx}_2", f"Proposal {extra_n}: how to respond",
+                              f"Propose a concrete response to that scenario with trade-offs and "
+                              f"conditions. Turn analysis into action with clear next steps for "
+                              f"{topic_short}.",
+                              1, 1),
+                    ],
+                ))
 
     llm_output = LLMOutput(topic=topic_title, slides=raw_slides[:num_slides])
     return compute_layout(llm_output, req)
@@ -956,7 +1149,8 @@ def _emergency_presentation(req: GenerateRequest) -> PresentationResponse:
         slides=[
             RawSlideContent(
                 slide_number=1,
-                slide_title="Tổng quan chủ đề",
+                section="",
+                slide_title=_clip_slide_title(f"Bài toán {_topic_phrase(req.prompt, 3)} và bước đi đầu tiên"),
                 cards=[card],
             )
         ],
