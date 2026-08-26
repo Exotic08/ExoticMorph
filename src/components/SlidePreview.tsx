@@ -247,14 +247,24 @@ export const SlidePreview: React.FC<SlidePreviewProps> = ({
             {/* Header của slide */}
             <div className="relative z-10 flex items-start justify-between gap-4">
               <div className="space-y-1">
-                {currentSlide.badge && (
+                {currentSlide.section && (
                   <motion.span
-                    layoutId="slide-badge"
-                    className="inline-block px-2.5 py-0.5 rounded-full text-[10px] font-semibold bg-purple-500/20 text-purple-300 border border-purple-500/30"
+                    layoutId="slide-section"
+                    className="inline-block text-[10px] font-bold uppercase tracking-[0.25em] text-cyan-300/90"
                   >
-                    {currentSlide.badge}
+                    {currentSlide.section}
                   </motion.span>
                 )}
+                <div className="flex items-center gap-2">
+                  {currentSlide.badge && (
+                    <motion.span
+                      layoutId="slide-badge"
+                      className="inline-block px-2.5 py-0.5 rounded-full text-[10px] font-semibold bg-purple-500/20 text-purple-300 border border-purple-500/30"
+                    >
+                      {currentSlide.badge}
+                    </motion.span>
+                  )}
+                </div>
                 <AnimatePresence mode="wait">
                   <motion.h3
                     key={currentSlide.id + "-title"}
@@ -315,28 +325,79 @@ export const SlidePreview: React.FC<SlidePreviewProps> = ({
                 </div>
               )}
 
-              {/* Danh sách luận điểm */}
-              {currentSlide.bulletPoints && currentSlide.bulletPoints.length > 0 && (
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                  {currentSlide.bulletPoints.map((point, idx) => (
+              {/* Thẻ nội dung hai phần: thông điệp cụ thể + đoạn diễn giải chi tiết */}
+              {currentSlide.cards && currentSlide.cards.length > 0 && (
+                <div
+                  className={`grid gap-3 ${
+                    currentSlide.cards.length === 1
+                      ? "grid-cols-1"
+                      : currentSlide.cards.length === 2
+                      ? "grid-cols-1 sm:grid-cols-2"
+                      : currentSlide.cards.length === 3
+                      ? "grid-cols-1 sm:grid-cols-3"
+                      : "grid-cols-1 sm:grid-cols-2 lg:grid-cols-4"
+                  }`}
+                >
+                  {currentSlide.cards.map((card, idx) => (
                     <motion.div
-                      key={`bullet-${idx}-${currentSlide.id}`}
-                      layoutId={`morph-bullet-${idx}`}
-                      initial={{ x: -10, opacity: 0 }}
-                      animate={{ x: 0, opacity: 1 }}
+                      key={`card-${idx}-${currentSlide.id}`}
+                      layoutId={`morph-card-${idx}`}
+                      initial={{ scale: 0.96, opacity: 0, y: 8 }}
+                      animate={{ scale: 1, opacity: 1, y: 0 }}
                       transition={{ duration: 0.4, delay: idx * 0.06 }}
-                      className="p-3.5 rounded-xl bg-white/[0.03] border border-white/[0.06] flex items-start gap-3"
+                      className="relative p-4 rounded-xl bg-white/[0.04] border border-white/[0.08] overflow-hidden backdrop-blur-md group"
                     >
-                      <span className="w-5 h-5 rounded-full bg-purple-500/20 text-purple-300 text-xs font-bold flex items-center justify-center shrink-0 mt-0.5 border border-purple-500/30">
-                        {idx + 1}
-                      </span>
-                      <p className="text-xs sm:text-sm text-slate-200 leading-relaxed font-normal">
-                        {point}
+                      {card.accentColor && (
+                        <span
+                          className="absolute top-0 left-0 right-0 h-[3px]"
+                          style={{ backgroundColor: card.accentColor }}
+                        />
+                      )}
+                      <div className="flex items-center gap-2 mb-2">
+                        {card.step && (
+                          <span
+                            className="w-5 h-5 rounded-full text-[11px] font-bold flex items-center justify-center shrink-0 text-white"
+                            style={{ backgroundColor: card.accentColor || "#8B5CF6" }}
+                          >
+                            {card.step}
+                          </span>
+                        )}
+                        <h4 className="text-sm sm:text-base font-bold text-white leading-snug">
+                          {card.title}
+                        </h4>
+                      </div>
+                      <p className="text-xs sm:text-[13px] text-slate-400 leading-relaxed">
+                        {card.body}
                       </p>
                     </motion.div>
                   ))}
                 </div>
               )}
+
+              {/* Fallback danh sách luận điểm (khi backend trả text/heading) */}
+              {(!currentSlide.cards || currentSlide.cards.length === 0) &&
+                currentSlide.bulletPoints &&
+                currentSlide.bulletPoints.length > 0 && (
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                    {currentSlide.bulletPoints.map((point, idx) => (
+                      <motion.div
+                        key={`bullet-${idx}-${currentSlide.id}`}
+                        layoutId={`morph-bullet-${idx}`}
+                        initial={{ x: -10, opacity: 0 }}
+                        animate={{ x: 0, opacity: 1 }}
+                        transition={{ duration: 0.4, delay: idx * 0.06 }}
+                        className="p-3.5 rounded-xl bg-white/[0.03] border border-white/[0.06] flex items-start gap-3"
+                      >
+                        <span className="w-5 h-5 rounded-full bg-purple-500/20 text-purple-300 text-xs font-bold flex items-center justify-center shrink-0 mt-0.5 border border-purple-500/30">
+                          {idx + 1}
+                        </span>
+                        <p className="text-xs sm:text-sm text-slate-200 leading-relaxed font-normal">
+                          {point}
+                        </p>
+                      </motion.div>
+                    ))}
+                  </div>
+                )}
 
               {/* Chỉ báo trạng thái Morph Anchor */}
               <motion.div

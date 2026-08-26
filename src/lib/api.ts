@@ -210,9 +210,19 @@ export async function generatePresentationPreview(
         isPositive: true,
       }));
 
-    // Tách bullet points nếu có dạng card
+    // Thẻ nội dung hai phần: tiêu đề (thông điệp cụ thể) + đoạn diễn giải chi tiết.
+    const cards = s.elements
+      .filter((e) => e.type === "card")
+      .map((c) => ({
+        title: c.content,
+        body: c.sub_text || "",
+        accentColor: c.accent_color || undefined,
+        step: c.step ?? undefined,
+      }));
+
+    // Các phần tử chữ khác (heading/kicker) dùng cho bullet fallback.
     const bulletPoints = s.elements
-      .filter((e) => e.type === "card" || e.type === "text")
+      .filter((e) => e.type === "text" || e.type === "heading")
       .map((c) => (c.label ? `[${c.label}] ${c.content}` : c.content));
 
     return {
@@ -221,6 +231,8 @@ export async function generatePresentationPreview(
       title: s.title,
       subtitle: s.subtitle || undefined,
       badge: `Slide 0${s.slide_number}`,
+      section: s.section || undefined,
+      cards: cards.length > 0 ? cards : undefined,
       bulletPoints: bulletPoints.length > 0 ? bulletPoints : undefined,
       metrics: metrics.length > 0 ? metrics : undefined,
       layoutType: idx === 0 ? "title-hero" : metrics.length > 0 ? "metrics-grid" : "split-feature",

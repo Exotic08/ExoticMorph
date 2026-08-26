@@ -54,26 +54,32 @@ class ContentCard(BaseModel):
     title: str = Field(
         ...,
         min_length=3,
-        max_length=80,
-        description="Tiêu đề tự nhiên dài 3-6 từ, chứa thuật ngữ thực tế của chủ đề.",
+        max_length=120,
+        description=(
+            "Tiêu đề là MỘT THÔNG ĐIỆP CỤ THỂ (2-10 từ), không phải nhãn chung chung. "
+            "Ví dụ ĐÚNG: 'Doanh thu tăng 35% nhờ mở rộng thị trường'; SAI: 'Tình hình doanh thu'."
+        ),
     )
     description: str = Field(
-        ..., min_length=150, max_length=450,
-        description="Đoạn văn bắt buộc 30-50 từ, chứa dữ kiện hoặc ví dụ cụ thể.",
+        ..., min_length=120, max_length=520,
+        description=(
+            "Đoạn diễn giải chi tiết 2-4 câu (20-60 từ) giải thích rõ bản chất vấn đề, "
+            "bắt buộc có dữ kiện định lượng, mốc thời gian, ví dụ hoặc quan hệ nhân quả."
+        ),
     )
 
     @field_validator("title")
     @classmethod
     def title_word_count(cls, value: str) -> str:
-        if not 3 <= len(value.split()) <= 6:
-            raise ValueError("title phải gồm 3-6 từ")
+        if not 2 <= len(value.split()) <= 10:
+            raise ValueError("title phải gồm 2-10 từ")
         return value
 
     @field_validator("description")
     @classmethod
     def description_word_count(cls, value: str) -> str:
-        if not 30 <= len(value.split()) <= 50:
-            raise ValueError("description phải gồm 30-50 từ")
+        if not 20 <= len(value.split()) <= 60:
+            raise ValueError("description phải gồm 20-60 từ")
         return value
 
     @property
@@ -111,11 +117,21 @@ class RawSlideContent(BaseModel):
         ge=1,
         description="Thứ tự slide (bắt đầu từ 1, liên tục tăng dần)",
     )
+    section: str = Field(
+        ...,
+        min_length=0,
+        max_length=60,
+        description=(
+            "Nhãn mục (kicker) ngắn gọn, viết HOA thể hiện vị trí slide trong mạch kể chuyện, "
+            "ví dụ: 'VẤN ĐỀ', 'NGUYÊN NHÂN', 'GIẢI PHÁP', 'KẾT QUẢ', 'HÀNH ĐỘNG'. "
+            "Không dùng nhãn sáo rỗng như 'Giới thiệu' hay 'Tổng quan'."
+        ),
+    )
     slide_title: str = Field(
         ...,
         min_length=1,
         max_length=200,
-        description="Tiêu đề chính của slide, hiển thị ở vùng header phía trên các thẻ",
+        description="Tiêu đề chính của slide — là một thông điệp/kết luận cụ thể, hiển thị ở vùng header phía trên các thẻ",
     )
     cards: List[ContentCard] = Field(
         ...,
@@ -153,9 +169,13 @@ class LLMOutput(BaseModel):
 #    (Được dùng bởi ppt_builder.py để dựng file PPTX)
 # ==============================================================================
 
-SlideElementType = Literal["text", "shape", "card", "metric", "heading", "badge"]
+SlideElementType = Literal[
+    "text", "shape", "card", "metric", "heading", "badge",
+    "kicker", "footer", "connector", "accent",
+]
 AspectRatioType = Literal["16:9", "4:3"]
 StyleType = Literal["Futuristic", "Minimal", "Corporate", "Creative"]
+LayoutType = Literal["hero", "compare", "features", "roadmap", "grid"]
 
 MAX_ELEMENTS_PER_SLIDE = 40
 MAX_SLIDES_PER_PRESENTATION = 30
@@ -173,8 +193,8 @@ class SlideElement(BaseModel):
     content: str = Field(default="")
     x: float = Field(ge=0.0, le=100.0)
     y: float = Field(ge=0.0, le=100.0)
-    width: float = Field(ge=1.0, le=100.0)
-    height: float = Field(ge=1.0, le=100.0)
+    width: float = Field(ge=0.01, le=100.0)
+    height: float = Field(ge=0.01, le=100.0)
     bg_color: Optional[str] = Field(default="#1E2230")
     text_color: Optional[str] = Field(default="#FFFFFF")
     morph_id: str = Field(default="")
@@ -183,6 +203,9 @@ class SlideElement(BaseModel):
     border_color: Optional[str] = Field(default=None)
     label: Optional[str] = Field(default=None)
     sub_text: Optional[str] = Field(default=None)
+    accent_color: Optional[str] = Field(default=None)
+    step: Optional[int] = Field(default=None, ge=1, le=20)
+    align: Optional[str] = Field(default=None, pattern="^(left|center|right)$")
 
 
 class Slide(BaseModel):
@@ -190,10 +213,12 @@ class Slide(BaseModel):
 
     slide_number: int = Field(ge=1)
     title: str = Field(default="")
+    section: str = Field(default="")
     subtitle: Optional[str] = Field(default=None)
     speaker_notes: Optional[str] = Field(default=None, max_length=2000)
     morph_description: Optional[str] = Field(default=None)
     bg_color: Optional[str] = Field(default="#0E1017")
+    layout_type: LayoutType = Field(default="features")
     elements: List[SlideElement] = Field(
         default_factory=list, max_length=MAX_ELEMENTS_PER_SLIDE
     )
