@@ -19,7 +19,7 @@ from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
-from app.config import settings
+from app.config import log_llm_status, settings
 from app.api.routes import router as api_router
 
 # Cấu hình logging
@@ -28,6 +28,12 @@ logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
 )
 logger = logging.getLogger("exoticmorph.main")
+
+# STARTUP DIAGNOSTICS: in trạng thái LLM (provider, model, API key đã mask,
+# file .env có đọc được không) ra console MỘT LẦN khi boot — để phát hiện ngay
+# sự cố dạng "biến môi trường rỗng" / "sai tên biến" / ".env không được nạp"
+# trước khi request đầu tiên đến (thay vì debug mò qua từng request lỗi).
+log_llm_status()
 
 # Khởi tạo ứng dụng FastAPI
 app = FastAPI(

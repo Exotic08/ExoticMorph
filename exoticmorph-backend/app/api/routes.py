@@ -27,7 +27,11 @@ from fastapi.responses import Response
 from app.config import settings
 from app.schemas.slide_schema import GenerateRequest, PresentationResponse
 from app.services.generator_service import build_pptx_from_schema
-from app.services.llm_service import generate_presentation_with_llm
+from app.services.llm_service import (
+    LLMConfigurationError,
+    LLMGenerationError,
+    generate_presentation_with_llm,
+)
 
 logger = logging.getLogger("exoticmorph.routes")
 router = APIRouter(prefix="/api/v1", tags=["ExoticMorph Generation"])
@@ -110,6 +114,8 @@ def _pptx_response(presentation_data: PresentationResponse) -> Response:
         },
         422: {"description": "Dữ liệu đầu vào hoặc cấu trúc slide không hợp lệ."},
         500: {"description": "Lỗi nội bộ trong quá trình sinh slide."},
+        502: {"description": "LLM provider thất bại (sai API key / hết quota / parse fail) — không còn fallback văn mẫu."},
+        503: {"description": "Backend chưa cấu hình API key cho LLM."},
     },
 )
 async def generate_pptx_presentation(request: GenerateRequest):
@@ -125,8 +131,23 @@ async def generate_pptx_presentation(request: GenerateRequest):
     )
 
     # 1. Gọi LLM để tính toán cấu trúc slide & ma trận tọa độ Morph.
-    #    (Hàm này có retry + fallback nên gần như không raise.)
-    presentation_data = await generate_presentation_with_llm(request)
+    #    v5: KHÔNG còn silent fallback — LLM thất bại ⇒ trả 502 với chẩn đoán rõ
+    #    ràng (API key sai / hết quota / mạng...), không trả slide văn mẫu rác.
+    try:
+        presentation_data = await generate_presentation_with_llm(request)
+    except LLMConfigurationError as exc:
+        logger.exception("Backend chưa cấu hình LLM (FULL TRACEBACK): %s", exc)
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=str(exc),
+        ) from exc
+    except LLMGenerationError as exc:
+        # Message của exception đã an toàn để hiển thị cho người dùng cuối.
+        logger.exception("Sinh nội dung bằng LLM thất bại (FULL TRACEBACK): %s", exc)
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=str(exc),
+        ) from exc
 
     # 2. Biên dịch dữ liệu JSON sang OpenXML PPTX.
     try:
@@ -152,7 +173,8 @@ async def generate_pptx_presentation(request: GenerateRequest):
     response_model=PresentationResponse,
     responses={
         200: {"description": "Cấu trúc JSON của bài trình chiếu."},
-        500: {"description": "Lỗi khi sinh cấu trúc slide."},
+        502: {"description": "LLM provider thất bại — message chẩn đoán rõ nguyên nhân."},
+        503: {"description": "Backend chưa cấu hình API key cho LLM."},
     },
 )
 async def generate_presentation_json(request: GenerateRequest):
@@ -165,9 +187,22 @@ async def generate_presentation_json(request: GenerateRequest):
     )
     try:
         return await generate_presentation_with_llm(request)
+    except LLMConfigurationError as exc:
+        logger.exception("Backend chưa cấu hình LLM (FULL TRACEBACK): %s", exc)
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=str(exc),
+        ) from exc
+    except LLMGenerationError as exc:
+        # Chẩn đoán rõ ràng (API key / quota / parse fail) — hiển thị trực tiếp,
+        # thay vì trả slide văn mẫu B2B rác như silent fallback bản cũ.
+        logger.exception("Sinh nội dung bằng LLM thất bại (FULL TRACEBACK): %s", exc)
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=str(exc),
+        ) from exc
     except Exception as exc:
-        # Lý thuyết không bao giờ xảy ra (fallback generator không fail),
-        # nhưng vẫn phải có lưới an toàn để không trả HTML traceback cho client.
+        # Lưới an toàn cuối cho lỗi không lường trước (layout engine...).
         logger.exception("Lỗi khi sinh JSON slide: %s", str(exc))
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
@@ -215,12 +250,20 @@ async def build_pptx_from_json(presentation: PresentationResponse):
     summary="Kiểm tra trạng thái sức khỏe của Backend",
 )
 async def health_check():
-    """Kiểm tra liveness và cấu hình LLM hiện tại."""
+    """Kiểm tra liveness, cấu hình LLM và trạng thái nạp API key (đã mask)."""
+    from app.config import describe_key_status
+
     return {
         "status": "online",
         "service": "ExoticMorph AI Backend",
         "version": "1.0.0",
         "llm_provider": settings.LLM_PROVIDER,
+        "openai_model": settings.OPENAI_MODEL,
+        "gemini_model": settings.GEMINI_MODEL,
         "openai_configured": bool(settings.OPENAI_API_KEY),
         "gemini_configured": bool(settings.GEMINI_API_KEY),
+        # Trạng thái key đã mask (VD "✅ ĐÃ NẠP AIza...**** (39 ký tự)") —
+        # giúp debug kết nối LLM từ Frontend mà KHÔNG lộ secret.
+        "openai_key_status": describe_key_status("OPENAI_API_KEY", settings.OPENAI_API_KEY),
+        "gemini_key_status": describe_key_status("GEMINI_API_KEY", settings.GEMINI_API_KEY),
     }
