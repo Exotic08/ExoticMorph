@@ -16,6 +16,7 @@ FIX LỖI NỘI DUNG KHÔNG BÁM SÁT CHỦ ĐỀ (v4 fixes):
 import asyncio
 import json
 import logging
+import re
 from typing import Any, Callable, Optional, TypeVar
 
 from app.config import settings
@@ -191,8 +192,6 @@ SYSTEM_PROMPT = (
 
 def _extract_json_object(text: str) -> dict:
     """Trích JSON object đầu tiên từ phản hồi LLM (chịu lỗi markdown fence)."""
-    import re
-
     if not text or not text.strip():
         raise ValueError("LLM trả về nội dung rỗng")
 
@@ -545,15 +544,169 @@ def _provider_ready(provider: str) -> bool:
     return False
 
 
-# ==============================================================================
+# =============================================================================
 # FALLBACK GENERATOR (Heuristic — KHÔNG BAO GIỜ fail)
-# ==============================================================================
+# =============================================================================
+# ContentCard bắt buộc:
+#   title       : 3-6 từ, 3-80 ký tự
+#   description : 30-50 từ, 150-450 ký tự
+# Bản cũ ghép nguyên prompt vào title (vd. "Bối cảnh tạo bài thuyết trình về
+# solar system") → Pydantic ValueError → HTTP 502. Helper bên dưới luôn kẹp
+# đúng số từ/ký tự trước khi tạo card.
+
+_TITLE_WORD_MIN, _TITLE_WORD_MAX = 3, 6
+_DESC_WORD_MIN, _DESC_WORD_MAX = 30, 50
+_TITLE_CHAR_MAX = 80
+_DESC_CHAR_MIN, _DESC_CHAR_MAX = 150, 450
+
+# Cụm mở đầu kiểu "tạo bài thuyết trình về X" — bỏ đi để lấy đúng chủ đề X.
+_PROMPT_NOISE = re.compile(
+    r"^(?:(?:hãy|hay|vui lòng|please)\s+)?"
+    r"(?:(?:tạo|tao|viết|viet|làm|lam|sinh|generate|create|make|write|build)\s+)?"
+    r"(?:(?:một|mot|an?|the)\s+)?"
+    r"(?:(?:bài|bai)\s+)?"
+    r"(?:thuyết\s*trình|thuyet\s*trinh|presentation|pptx|slides?|deck)\s+"
+    r"(?:(?:về|ve|about|on|for|of|với\s+chủ\s+đề|chu\s+de)\s+)?",
+    re.IGNORECASE,
+)
+
+_SAFE_TITLE = "Chủ đề then chốt"
+# 38 từ / ~220 ký tự — nằm giữa 30-50 từ và 150-450 ký tự.
+_SAFE_DESCRIPTION = (
+    "Phần này phân tích bối cảnh cơ chế vận hành và dữ kiện cụ thể của chủ đề "
+    "để người xem nắm vấn đề cốt lõi. Nội dung nêu phạm vi áp dụng mối liên hệ "
+    "nhân quả cùng ý nghĩa thực tiễn khi triển khai ngay bây giờ."
+)
+_DESC_FILLER = (
+    "Phần phân tích nêu rõ cơ chế dữ kiện và mối liên hệ nhân quả để người xem "
+    "nắm bản chất vấn đề phạm vi áp dụng cùng ý nghĩa thực tiễn khi triển khai "
+    "trong bối cảnh hiện tại của chủ đề này."
+)
+
+
+def _split_words(text: str) -> list:
+    return [w for w in (text or "").replace("\n", " ").split() if w]
+
+
+def _extract_topic_core(prompt: str) -> str:
+    """Lấy chủ đề thật từ prompt, bỏ cụm 'tạo bài thuyết trình về ...'."""
+    first_line = re.sub(r"\s+", " ", (prompt or "").split("\n")[0]).strip()
+    cleaned = _PROMPT_NOISE.sub("", first_line).strip(" .,:;!-–—")
+    core = cleaned or first_line or "chủ đề chính"
+    if len(core) > 120:
+        core = core[:117].rstrip() + "..."
+    return core
+
+
+def _topic_phrase(prompt: str, max_words: int = 3) -> str:
+    """Cụm 1-3 từ dùng trong title card (để tổng title không vượt 6 từ)."""
+    words = _split_words(_extract_topic_core(prompt))[:max_words]
+    return " ".join(words) if words else "chủ đề chính"
+
+
+def _fit_title(text: str) -> str:
+    """Kẹp title đúng 3-6 từ và ≤ 80 ký tự."""
+    pads = ["cốt", "lõi", "then", "chốt"]
+    words = _split_words(text)
+    i = 0
+    while len(words) < _TITLE_WORD_MIN:
+        words.append(pads[i % len(pads)])
+        i += 1
+    words = words[:_TITLE_WORD_MAX]
+    result = " ".join(words)
+    while len(result) > _TITLE_CHAR_MAX and len(words) > _TITLE_WORD_MIN:
+        words.pop()
+        result = " ".join(words)
+    if not (_TITLE_WORD_MIN <= len(_split_words(result)) <= _TITLE_WORD_MAX) or not (
+        3 <= len(result) <= _TITLE_CHAR_MAX
+    ):
+        return _SAFE_TITLE
+    return result
+
+
+def _fit_description(text: str) -> str:
+    """Kẹp description đúng 30-50 từ và 150-450 ký tự."""
+    filler = _split_words(_DESC_FILLER)
+    words = _split_words(text)
+    i = 0
+    while True:
+        candidate = " ".join(words)
+        need_words = len(words) < _DESC_WORD_MIN
+        need_chars = len(candidate) < _DESC_CHAR_MIN
+        if not need_words and not need_chars:
+            break
+        if len(words) >= _DESC_WORD_MAX:
+            break
+        words.append(filler[i % len(filler)])
+        i += 1
+    words = words[:_DESC_WORD_MAX]
+    result = " ".join(words)
+    while len(result) > _DESC_CHAR_MAX and len(words) > _DESC_WORD_MIN:
+        words.pop()
+        result = " ".join(words)
+    word_n = len(_split_words(result))
+    if not (
+        _DESC_WORD_MIN <= word_n <= _DESC_WORD_MAX
+        and _DESC_CHAR_MIN <= len(result) <= _DESC_CHAR_MAX
+    ):
+        return _SAFE_DESCRIPTION
+    return result
+
+
+def _make_card(
+    *,
+    morph_id: str,
+    title: str,
+    description: str,
+    color_theme: str,
+    order: int,
+):
+    """Tạo ContentCard luôn vượt qua Pydantic (title 3-6 từ, desc 30-50 từ)."""
+    from app.schemas.slide_schema import ContentCard
+
+    safe_id = re.sub(r"[^a-zA-Z0-9_]+", "_", (morph_id or "card")).strip("_") or "card"
+    theme = color_theme if re.fullmatch(r"#?[0-9A-Fa-f]{6}", color_theme or "") else "#8B5CF6"
+    try:
+        return ContentCard(
+            morph_id=safe_id[:80],
+            title=_fit_title(title),
+            description=_fit_description(description),
+            color_theme=theme,
+            order=max(0, min(int(order), 20)),
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("ContentCard fallback an toàn vì: %s", exc)
+        return ContentCard(
+            morph_id=safe_id[:80],
+            title=_SAFE_TITLE,
+            description=_SAFE_DESCRIPTION,
+            color_theme=theme,
+            order=max(0, min(int(order), 20)),
+        )
+
+
+def _clip_slide_title(text: str) -> str:
+    title = re.sub(r"\s+", " ", (text or "").strip()) or "Bài Trình Chiếu ExoticMorph"
+    return title[:200]
+
 
 def generate_fallback_presentation(req: GenerateRequest) -> PresentationResponse:
-    """Sinh LLMOutput dự phòng rồi chạy qua Layout Engine."""
-    logger.info("Dùng Heuristic Fallback Generator cho prompt: %s", req.prompt[:80])
+    """Sinh LLMOutput dự phòng rồi chạy qua Layout Engine.
 
-    from app.schemas.slide_schema import ContentCard, RawSlideContent
+    Không được raise — đây là lưới an toàn cuối khi LLM/API key không sẵn sàng.
+    """
+    logger.info("Dùng Heuristic Fallback Generator cho prompt: %s", req.prompt[:80])
+    try:
+        return _build_fallback_presentation(req)
+    except Exception as exc:  # noqa: BLE001
+        logger.exception(
+            "Fallback generator lỗi không mong muốn: %s — dùng template an toàn.", exc
+        )
+        return _emergency_presentation(req)
+
+
+def _build_fallback_presentation(req: GenerateRequest) -> PresentationResponse:
+    from app.schemas.slide_schema import RawSlideContent
 
     num_slides = max(1, min(req.num_slides, 20))
     accents = {
@@ -563,36 +716,46 @@ def generate_fallback_presentation(req: GenerateRequest) -> PresentationResponse
         "Creative":   ["#D946EF", "#F59E0B", "#06B6D4", "#241438", "#341D4E"],
     }.get(req.style, ["#8B5CF6", "#06B6D4", "#EC4899", "#161926", "#1E2235"])
 
-    topic_title = req.prompt.split("\n")[0].strip()
-    if len(topic_title) > 80:
-        topic_title = topic_title[:77] + "..."
-    if not topic_title:
-        topic_title = "Bài Trình Chiếu ExoticMorph"
+    topic_core = _extract_topic_core(req.prompt)
+    topic_short = _topic_phrase(req.prompt, 3)
+    topic_title = _clip_slide_title(topic_core)
 
     raw_slides: list = []
 
     raw_slides.append(RawSlideContent(
         slide_number=1,
-        slide_title=f"Tổng Quan: {topic_title}",
+        slide_title=_clip_slide_title(f"Tổng Quan: {topic_title}"),
         cards=[
-            ContentCard(
+            _make_card(
                 morph_id="hero_card",
-                title=f"Bối cảnh {topic_title}",
-                description=f"Tổng quan về '{topic_title}': các vấn đề cốt lõi, bối cảnh và lý do chủ đề này quan trọng. Toàn bộ bài trình chiếu sẽ đi sâu vào các khía cạnh liên quan trực tiếp đến yêu cầu của bạn.",
+                title=f"Bối cảnh {topic_short}",
+                description=(
+                    f"Tổng quan về {topic_core}: các vấn đề cốt lõi, bối cảnh và lý do "
+                    "chủ đề này quan trọng. Toàn bộ bài trình chiếu đi sâu vào khía cạnh "
+                    "liên quan trực tiếp, kèm dữ kiện cụ thể và mối liên hệ nhân quả rõ ràng."
+                ),
                 color_theme=accents[0],
                 order=0,
             ),
-            ContentCard(
+            _make_card(
                 morph_id="col_1",
-                title="Đặc điểm {topic_title}",
-                description=f"Những khía cạnh, giá trị và lợi ích đáng chú ý nhất liên quan trực tiếp đến {topic_title}, được phân tích chi tiết từ nhiều góc nhìn chuyên ngành khác nhau. Mỗi đặc điểm đều đi kèm với ví dụ minh hoạ và dữ kiện cụ thể giúp người xem hiểu rõ bản chất của vấn đề.",
+                title=f"Đặc điểm {topic_short}",
+                description=(
+                    f"Những khía cạnh giá trị và lợi ích đáng chú ý nhất liên quan trực tiếp "
+                    f"đến {topic_core}, được phân tích từ nhiều góc nhìn chuyên ngành. Mỗi "
+                    "đặc điểm đi kèm ví dụ minh hoạ và dữ kiện cụ thể giúp nắm bản chất vấn đề."
+                ),
                 color_theme=accents[3],
                 order=1,
             ),
-            ContentCard(
+            _make_card(
                 morph_id="col_2",
-                title="Các thành phần {topic_title}",
-                description="Cấu trúc và các thành phần chính tạo nên {topic_title}, bao gồm những yếu tố then chốt, mối liên hệ giữa các phần tử và vai trò của từng thành phần trong tổng thể. Các slide tiếp theo sẽ lần lượt đi vào chi tiết phân tích chuyên sâu.",
+                title=f"Thành phần {topic_short}",
+                description=(
+                    f"Cấu trúc và các thành phần chính tạo nên {topic_core}, gồm yếu tố then "
+                    "chốt, mối liên hệ giữa các phần tử và vai trò của từng thành phần trong "
+                    "tổng thể. Các slide tiếp theo lần lượt đi vào phân tích chuyên sâu."
+                ),
                 color_theme=accents[3],
                 order=2,
             ),
@@ -602,26 +765,38 @@ def generate_fallback_presentation(req: GenerateRequest) -> PresentationResponse
     if num_slides >= 2:
         raw_slides.append(RawSlideContent(
             slide_number=2,
-            slide_title=f"Phân Tích Chuyên Sâu: {topic_title}",
+            slide_title=_clip_slide_title(f"Phân Tích Chuyên Sâu: {topic_title}"),
             cards=[
-                ContentCard(
+                _make_card(
                     morph_id="hero_card",
-                    title="Cơ chế {topic_title}",
-                    description=f"Đi sâu vào thành phần, nguyên nhân và yếu tố quan trọng nhất làm nên {topic_title}. Phân tích chi tiết từng thành phần cấu tạo nên tổng thể, giải thích tại sao đây là điểm then chốt cần được ưu tiên hàng đầu trong mọi kế hoạch triển khai.",
+                    title=f"Cơ chế {topic_short}",
+                    description=(
+                        f"Đi sâu vào thành phần nguyên nhân và yếu tố quan trọng nhất làm nên "
+                        f"{topic_core}. Phân tích từng thành phần cấu tạo nên tổng thể và giải "
+                        "thích vì sao đây là điểm then chốt cần ưu tiên trong kế hoạch triển khai."
+                    ),
                     color_theme=accents[0],
                     order=0,
                 ),
-                ContentCard(
+                _make_card(
                     morph_id="col_1",
-                    title="Số liệu {topic_title}",
-                    description="Các số liệu, nghiên cứu điển hình và thống kê thực tế liên quan trực tiếp đến chủ đề, giúp minh chứng cho luận điểm chính. Mỗi con số đều có nguồn trích dẫn rõ ràng và phạm vi áp dụng cụ thể để đảm bảo tính chính xác và đáng tin cậy.",
+                    title=f"Số liệu {topic_short}",
+                    description=(
+                        f"Các số liệu nghiên cứu điển hình và thống kê thực tế liên quan trực "
+                        f"tiếp đến {topic_core}, giúp minh chứng luận điểm chính. Mỗi con số có "
+                        "phạm vi áp dụng cụ thể để đảm bảo tính chính xác và đáng tin cậy."
+                    ),
                     color_theme=accents[1],
                     order=1,
                 ),
-                ContentCard(
+                _make_card(
                     morph_id="col_2",
-                    title="Cách tiếp cận {topic_title}",
-                    description=f"Cách tiếp cận, công cụ và phương pháp cụ thể có thể áp dụng để giải quyết vấn đề hoặc khai thác cơ hội từ {topic_title}. Mỗi phương pháp đều đi kèm hướng dẫn thực hiện chi tiết và lưu ý quan trọng để đạt hiệu quả tối ưu.",
+                    title=f"Cách tiếp cận {topic_short}",
+                    description=(
+                        f"Cách tiếp cận công cụ và phương pháp cụ thể có thể áp dụng để giải "
+                        f"quyết vấn đề hoặc khai thác cơ hội từ {topic_core}. Mỗi phương pháp "
+                        "đi kèm hướng dẫn thực hiện và lưu ý quan trọng để đạt hiệu quả tối ưu."
+                    ),
                     color_theme=accents[2],
                     order=2,
                 ),
@@ -631,19 +806,27 @@ def generate_fallback_presentation(req: GenerateRequest) -> PresentationResponse
     if num_slides >= 3:
         raw_slides.append(RawSlideContent(
             slide_number=3,
-            slide_title="Kết Quả & Lợi Ích Kỳ Vọng",
+            slide_title="Kết Quả và Lợi Ích Kỳ Vọng",
             cards=[
-                ContentCard(
+                _make_card(
                     morph_id="hero_card",
-                    title="Ảnh hưởng {topic_title}",
-                    description=f"Kết quả và lợi ích lớn nhất khi áp dụng thành công các giải pháp về {topic_title}, bao gồm những tác động tích cực lên doanh thu, hiệu quả vận hành và vị thế cạnh tranh. Mỗi lợi ích đều được định lượng cụ thể để thấy rõ giá trị mang lại.",
+                    title=f"Ảnh hưởng {topic_short}",
+                    description=(
+                        f"Kết quả và lợi ích lớn nhất khi áp dụng thành công các giải pháp về "
+                        f"{topic_core}, gồm tác động tích cực lên hiệu quả vận hành và vị thế "
+                        "cạnh tranh. Mỗi lợi ích được nêu rõ điều kiện để thấy giá trị mang lại."
+                    ),
                     color_theme=accents[0],
                     order=0,
                 ),
-                ContentCard(
+                _make_card(
                     morph_id="kpi_roi",
-                    title="Thước đo {topic_title}",
-                    description="Các chỉ số đo lường hiệu quả (KPI) cụ thể để theo dõi tiến độ triển khai và đánh giá mức độ thành công sau khi hoàn thành. Mỗi KPI đều có công thức tính, nguồn dữ liệu và ngưỡng mục tiêu rõ ràng giúp đánh giá khách quan.",
+                    title=f"Thước đo {topic_short}",
+                    description=(
+                        f"Các chỉ số đo lường hiệu quả cụ thể để theo dõi tiến độ triển khai "
+                        f"{topic_core} và đánh giá mức độ thành công sau khi hoàn thành. Mỗi "
+                        "chỉ số có nguồn dữ liệu và ngưỡng mục tiêu rõ ràng giúp đánh giá khách quan."
+                    ),
                     color_theme=accents[4],
                     order=1,
                 ),
@@ -655,31 +838,47 @@ def generate_fallback_presentation(req: GenerateRequest) -> PresentationResponse
             slide_number=4,
             slide_title="Lộ Trình Triển Khai",
             cards=[
-                ContentCard(
+                _make_card(
                     morph_id="stage_1",
-                    title="Giai Đoạn 1 — Chuẩn Bị",
-                    description="Giai đoạn khởi tạo dự án, bao gồm thu thập yêu cầu chi tiết từ các bên liên quan, phân tích hiện trạng, thiết kế kế hoạch triển khai chi tiết và chuẩn bị đầy đủ nguồn lực về nhân sự, công nghệ và ngân sách để bắt đầu.",
+                    title="Giai đoạn một chuẩn bị",
+                    description=(
+                        f"Giai đoạn khởi tạo liên quan đến {topic_core}, gồm thu thập yêu cầu "
+                        "chi tiết từ các bên liên quan, phân tích hiện trạng, thiết kế kế hoạch "
+                        "triển khai và chuẩn bị nguồn lực về nhân sự công nghệ cùng ngân sách ban đầu."
+                    ),
                     color_theme=accents[0],
                     order=0,
                 ),
-                ContentCard(
+                _make_card(
                     morph_id="stage_2",
-                    title="Giai Đoạn 2 — Thử Nghiệm",
-                    description="Giai đoạn triển khai thí điểm (MVP/Pilot) trên phạm vi hạn chế để kiểm chứng tính khả thi và hiệu quả thực tế. Thu thập phản hồi từ người dùng và các bên liên quan, phân tích dữ liệu thí điểm để tinh chỉnh quy trình trước khi nhân rộng.",
+                    title="Giai đoạn hai thử nghiệm",
+                    description=(
+                        f"Giai đoạn thí điểm trên phạm vi hạn chế để kiểm chứng tính khả thi "
+                        f"của {topic_core}. Thu thập phản hồi từ người dùng và các bên liên quan, "
+                        "phân tích dữ liệu thí điểm để tinh chỉnh quy trình trước khi nhân rộng."
+                    ),
                     color_theme=accents[3],
                     order=1,
                 ),
-                ContentCard(
+                _make_card(
                     morph_id="stage_3",
-                    title="Giai Đoạn 3 — Mở Rộng",
-                    description="Giai đoạn triển khai trên quy mô lớn theo kế hoạch đã được tinh chỉnh từ giai đoạn thử nghiệm. Tối ưu hiệu năng hệ thống dựa trên dữ liệu vận hành thực tế, giải quyết các vấn đề phát sinh và tích hợp với các hệ thống liên quan.",
+                    title="Giai đoạn ba mở rộng",
+                    description=(
+                        f"Giai đoạn triển khai trên quy mô lớn theo kế hoạch đã tinh chỉnh từ "
+                        f"thử nghiệm {topic_core}. Tối ưu hiệu năng dựa trên dữ liệu vận hành "
+                        "thực tế, xử lý vấn đề phát sinh và tích hợp với các hệ thống liên quan."
+                    ),
                     color_theme=accents[3],
                     order=2,
                 ),
-                ContentCard(
+                _make_card(
                     morph_id="stage_4",
-                    title="Giai Đoạn 4 — Vận Hành",
-                    description="Giai đoạn đưa giải pháp vào vận hành ổn định trong môi trường sản xuất thực tế. Giám sát liên tục các chỉ số hiệu suất, xử lý các sự cố phát sinh và thực hiện cải tiến liên tục dựa trên dữ liệu thực tế và phản hồi từ người dùng.",
+                    title="Giai đoạn bốn vận hành",
+                    description=(
+                        f"Giai đoạn đưa giải pháp {topic_core} vào vận hành ổn định trong môi "
+                        "trường thực tế. Giám sát liên tục các chỉ số hiệu suất, xử lý sự cố "
+                        "phát sinh và cải tiến liên tục dựa trên dữ liệu cùng phản hồi người dùng."
+                    ),
                     color_theme=accents[1],
                     order=3,
                 ),
@@ -689,12 +888,16 @@ def generate_fallback_presentation(req: GenerateRequest) -> PresentationResponse
     if num_slides >= 5:
         raw_slides.append(RawSlideContent(
             slide_number=5,
-            slide_title=f"Kết Luận & Bước Tiếp Theo",
+            slide_title="Kết Luận và Bước Tiếp Theo",
             cards=[
-                ContentCard(
+                _make_card(
                     morph_id="hero_card",
-                    title=f"Bắt Đầu Hành Trình",
-                    description=f"Tóm tắt lại thông điệp cốt lõi về {topic_title} và kêu gọi hành động cụ thể để đưa ý tưởng thành hiện thực. Hãy liên hệ để bắt đầu ngay hôm nay.",
+                    title=f"Hành trình {topic_short}",
+                    description=(
+                        f"Tóm tắt thông điệp cốt lõi về {topic_core} và kêu gọi hành động cụ thể "
+                        "để đưa ý tưởng thành hiện thực. Hãy xác định bước tiếp theo, phân công "
+                        "trách nhiệm rõ ràng và bắt đầu triển khai ngay trong chu kỳ làm việc tới."
+                    ),
                     color_theme=accents[0],
                     order=0,
                 ),
@@ -703,21 +906,30 @@ def generate_fallback_presentation(req: GenerateRequest) -> PresentationResponse
 
     if num_slides > 5:
         for s_idx in range(6, num_slides + 1):
+            extra_n = s_idx - 5
             raw_slides.append(RawSlideContent(
                 slide_number=s_idx,
-                slide_title=f"Chuyên Đề Mở Rộng {s_idx - 5}: {topic_title}",
+                slide_title=_clip_slide_title(f"Chuyên Đề Mở Rộng {extra_n}: {topic_title}"),
                 cards=[
-                    ContentCard(
+                    _make_card(
                         morph_id=f"extra_{s_idx}_1",
-                        title=f"Phân Tích Sâu #{s_idx - 5}A",
-                        description=f"Đào sâu vào khía cạnh, kịch bản và thách thức đặc thù liên quan trực tiếp đến {topic_title} chưa được đề cập ở các slide trước. Phân tích chi tiết nguyên nhân, hậu quả và các yếu tố ảnh hưởng để hiểu rõ bản chất vấn đề.",
+                        title=_fit_title(f"Phân tích sâu {extra_n}A {topic_short}"),
+                        description=(
+                            f"Đào sâu khía cạnh kịch bản và thách thức đặc thù liên quan trực "
+                            f"tiếp đến {topic_core} chưa đề cập ở các slide trước. Phân tích "
+                            "nguyên nhân hậu quả và yếu tố ảnh hưởng để hiểu rõ bản chất vấn đề."
+                        ),
                         color_theme=accents[3],
                         order=0,
                     ),
-                    ContentCard(
+                    _make_card(
                         morph_id=f"extra_{s_idx}_2",
-                        title=f"Phân Tích Sâu #{s_idx - 5}B",
-                        description=f"Đề xuất giải pháp chi tiết, các bước thực hiện cụ thể và bài học kinh nghiệm rút ra cho khía cạnh được phân tích tại thẻ bên cạnh. Mỗi đề xuất đều có phân tích ưu nhược điểm và điều kiện áp dụng rõ ràng.",
+                        title=_fit_title(f"Giải pháp sâu {extra_n}B {topic_short}"),
+                        description=(
+                            f"Đề xuất giải pháp chi tiết các bước thực hiện và bài học kinh nghiệm "
+                            f"rút ra cho {topic_core}. Mỗi đề xuất có phân tích ưu nhược điểm và "
+                            "điều kiện áp dụng rõ ràng để chuyển từ ý tưởng sang hành động cụ thể."
+                        ),
                         color_theme=accents[4],
                         order=1,
                     ),
@@ -728,9 +940,33 @@ def generate_fallback_presentation(req: GenerateRequest) -> PresentationResponse
     return compute_layout(llm_output, req)
 
 
-# ==============================================================================
+def _emergency_presentation(req: GenerateRequest) -> PresentationResponse:
+    """Template cứng, luôn hợp lệ — chỉ dùng khi fallback heuristic cũng vỡ."""
+    from app.schemas.slide_schema import ContentCard, RawSlideContent
+
+    card = ContentCard(
+        morph_id="hero_card",
+        title=_SAFE_TITLE,
+        description=_SAFE_DESCRIPTION,
+        color_theme="#8B5CF6",
+        order=0,
+    )
+    llm_output = LLMOutput(
+        topic=_clip_slide_title(_extract_topic_core(req.prompt)),
+        slides=[
+            RawSlideContent(
+                slide_number=1,
+                slide_title="Tổng quan chủ đề",
+                cards=[card],
+            )
+        ],
+    )
+    return compute_layout(llm_output, req)
+
+
+# =============================================================================
 # ENTRY POINT CHÍNH
-# ==============================================================================
+# =============================================================================
 
 async def generate_presentation_with_llm(req: GenerateRequest) -> PresentationResponse:
     """Gọi LLM -> LLMOutput -> Layout Engine -> PresentationResponse.
