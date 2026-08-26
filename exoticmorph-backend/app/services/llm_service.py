@@ -1,23 +1,34 @@
 """
-LLM Service Module for ExoticMorph (Refactored v4)
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-FIX LỖI NỘI DUNG KHÔNG BÁM SÁT CHỦ ĐỀ (v4 fixes):
-  1. **Topic Adherence Rule được đẩy lên ƯU TIÊN SỐ 1** trong System Prompt,
-     kèm cảnh báo nghiêm ngặt chống copy Few-Shot content.
-  2. **Few-Shot được làm trừu tượng (Abstract Examples)** — các ví dụ JSON
-     dùng placeholder rõ ràng "[NỘI DUNG VÍ DỤ - KHÔNG SAO CHÉP]" thay vì
-     nội dung cụ thể (tránh Few-Shot Contamination).
-  3. **User Prompt được bao bọc bằng delimiter rõ ràng**
-     (=== USER TOPIC TO GENERATE === ... === END OF USER TOPIC ===).
-  4. **Temperature = 0.4** (giảm từ 0.7 để bám chặt chủ đề hơn, vẫn đủ sáng tạo).
-  5. **Logging toàn bộ prompt flow** (để audit biến req.prompt có bị mất hay không).
+LLM Service Module for ExoticMorph (v5 — LLM-only, Dynamic Persona)
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Thay đổi nền tảng so với v4:
+
+1. **XÓA BỎ HOÀN TOÀN Heuristic Fallback ghép chuỗi ``{topic}``** — các văn mẫu
+   B2B rác như "Nhu cầu ... đang tăng tốc", "Điểm nghẽn đang kìm hãm tiến độ",
+   "Cái giá của việc chần chừ", "Vì sao ... trở thành ưu tiên chiến lược số một"
+   đã bị loại bỏ khỏi codebase. Khi LLM thất bại, backend KHÔNG âm thầm trả về
+   slide kém chất lượng nữa (chấm dứt *silent fallback*), mà raise
+   :class:`LLMGenerationError` kèm chẩn đoán rõ ràng (API key sai / hết quota /
+   timeout mạng / parse JSON thất bại) để routes trả HTTP 502 cho người dùng.
+
+2. **DYNAMIC PERSONA SYSTEM PROMPT** — LLM tự nhận diện lĩnh vực của chủ đề
+   (Thiên văn, Lịch sử, Y học, Nông nghiệp, Công nghệ...) rồi NHẬP VAI chuyên
+   gia hàng đầu lĩnh vực đó, dùng đúng từ vựng chuyên ngành (Thủy tinh, quỹ
+   đạo elip, Robusta, Buôn Ma Thuột...). Mỗi slide bắt buộc chứa ít nhất 3
+   thuật ngữ/số liệu/sự thật chuyên ngành (Domain Vocabulary Rule) và cấm
+   tuyệt đối mọi tiêu đề ghép từ vô nghĩa.
+
+3. **JSON PARSE RETRY với THANG NHIỆT ĐỘ** — mỗi lần retry sau khi parse/
+   validation thất bại dùng một temperature khác nhau (0.4 → 0.2 → 0.7): hạ
+   nhiệt để bám schema chặt hơn, rồi tăng nhiệt để thoát khỏi output lỗi lặp.
+   Chỉ chấp nhận thất bại sau khi đã hết toàn bộ lần thử.
 """
 
 import asyncio
 import json
 import logging
 import re
-from typing import Any, Callable, Optional, TypeVar
+from typing import Any, Callable, Optional, Tuple
 
 from app.config import settings
 from app.schemas.slide_schema import (
@@ -25,174 +36,444 @@ from app.schemas.slide_schema import (
     LLMOutput,
     PresentationResponse,
 )
-from app.services.layout_engine import CARD_ACCENTS, compute_layout
+from app.services.layout_engine import compute_layout
 
 logger = logging.getLogger("exoticmorph.llm")
 
-# ==============================================================================
+# =============================================================================
 # CẤU HÌNH
-# ==============================================================================
+# =============================================================================
 LLM_MAX_ATTEMPTS = 3              # Retry lỗi tạm thời (mạng/rate-limit/5xx)
 LLM_RETRY_BASE_DELAY_S = 1.5
 LLM_REQUEST_TIMEOUT_S = 90.0
-MAX_VALIDATION_RETRIES = 2        # Retry khi Pydantic Validation fail
+MAX_VALIDATION_RETRIES = 2        # Số lần thử lại khi Parse JSON / Pydantic fail (tổng 3 lần gọi)
 
-# ⚠️ FIX: Nhiệt độ LLM hạ từ 0.7 → 0.4 để bám chủ đề, bớt ngẫu hứng.
-# (0.0 quá lặp/lạnh, 0.7+ dễ bịa chuyện lệch topic, 0.4 cân bằng tốt).
-LLM_TEMPERATURE = 0.4
+# THANG NHIỆT ĐỘ CHO CÁC LẦN RETRY KHI JSON/SCHEMA SAI:
+#   - Lần 1 = 0.4 : cân bằng giữa sáng tạo và bám chủ đề (chế độ mặc định).
+#   - Lần 2 = 0.2 : hạ nhiệt → model "nghe lời" hơn, tuân thủ schema chặt hơn.
+#   - Lần 3 = 0.7 : tăng nhiệt → phá vỡ vòng lặp output lỗi lặp lại y hệt.
+TEMPERATURE_LADDER: Tuple[float, ...] = (0.4, 0.2, 0.7)
+LLM_TEMPERATURE = TEMPERATURE_LADDER[0]
 
-T = TypeVar("T")
+
+# =============================================================================
+# NGOẠI LỆ — FAIL LOUD, KHÔNG SILENT FALLBACK
+# =============================================================================
+
+class LLMGenerationError(Exception):
+    """Mọi LLM provider đều thất bại khi sinh nội dung.
+
+    Message của exception này được thiết kế AN TOÀN để hiển thị thẳng cho
+    người dùng cuối (không chứa API key, không chứa traceback nội bộ).
+    """
 
 
-# ==============================================================================
-# FEW-SHOT EXAMPLES — DẠNG ABSTRACT (KHÔNG CHỨA NỘI DUNG CỤ THỂ)
-# ==============================================================================
-# QUAN TRỌNG: Các ví dụ này CHỈ dùng để minh hoẠ CẤU TRÚC JSON.
-# Nội dung (topic, title, description) được viết dạng placeholder [VÍ DỤ] rõ ràng
-# để LLM KHÔNG copy nội dung vào output thực tế. Đây là fix chính cho
-# lỗi Few-Shot Contamination (ví dụ: "Hệ Mặt Trời" cứ lặp lại).
+class LLMConfigurationError(LLMGenerationError):
+    """Backend chưa được cấu hình LLM hợp lệ (thiếu API key / provider mock)."""
+
+
+# =============================================================================
+# MASK BÍ MẬT TRƯỚC KHI LOG / TRẢ VỀ CLIENT
+# =============================================================================
+# Lỗi từ Google GenAI đôi khi kèm nguyên URL chứa ?key=AIza..., hoặc message
+# dán lại API key. Mọi chuỗi lỗi trước khi in log hay trả HTTP detail đều phải
+# đi qua hàm này.
+
+_KEY_PARAM_RE = re.compile(r"([?&]key=)[A-Za-z0-9_\-]{4,}", re.IGNORECASE)
+
+
+def _mask_sensitive(text: str) -> str:
+    """Che API key / token khỏi chuỗi lỗi trước khi log hoặc trả về client."""
+    if not text:
+        return text
+    masked = _KEY_PARAM_RE.sub(r"\1****", str(text))
+    for key in (settings.GEMINI_API_KEY, settings.OPENAI_API_KEY):
+        if key and len(key) >= 6 and key in masked:
+            masked = masked.replace(key, f"{key[:4]}...****")
+    return masked
+
+
+def _summarize_exc(exc: Exception, limit: int = 220) -> str:
+    """Tóm tắt lỗi gốc (đã mask) để nhúng vào message trả về client."""
+    raw = f"{type(exc).__name__}: {exc}"
+    masked = _mask_sensitive(raw).replace("\n", " ").strip()
+    return masked[:limit]
+
+
+# Lý do thất bại được chuẩn hóa để hiển thị cho người dùng
+REASON_API_KEY_INVALID = "API key không hợp lệ hoặc đã bị thu hồi"
+REASON_PERMISSION_DENIED = "API key không có quyền truy cập model này"
+REASON_QUOTA_EXCEEDED = "Đã vượt hạn mức / rate limit (quota) của provider"
+REASON_NETWORK_TIMEOUT = "Không kết nối được máy chủ LLM (mất mạng / timeout)"
+REASON_OUTPUT_INVALID = "LLM trả về dữ liệu sai định dạng sau khi đã thử lại nhiều lần"
+REASON_UNKNOWN = "Lỗi không xác định từ provider"
+
+_HINTS_BY_REASON = {
+    REASON_API_KEY_INVALID: (
+        "Hãy kiểm tra lại giá trị {key_env} trong biến môi trường của Backend "
+        "(lấy key mới tại Google AI Studio / OpenAI Platform)."
+    ),
+    REASON_PERMISSION_DENIED: (
+        "API key có thể chưa bật API tương ứng hoặc khu vực không được hỗ trợ — "
+        "kiểm tra quyền truy cập của key và model {model}."
+    ),
+    REASON_QUOTA_EXCEEDED: (
+        "Tài khoản đã hết hạn mức miễn phí hoặc bị giới hạn tần suất — "
+        "chờ ít phút rồi thử lại, hoặc nâng gói/bật billing cho API key."
+    ),
+    REASON_NETWORK_TIMEOUT: (
+        "Kiểm tra kết nối mạng của server Backend (hoặc máy chủ LLM đang quá tải) "
+        "rồi thử lại sau ít giây."
+    ),
+    REASON_OUTPUT_INVALID: (
+        "Model đang sinh JSON sai schema — hãy thử lại, hoặc đổi sang model mới hơn "
+        "trong cấu hình Backend."
+    ),
+    REASON_UNKNOWN: "Hãy xem log Backend để biết chi tiết kỹ thuật.",
+}
+
+
+def _diagnose_exception(exc: Exception, provider_name: str) -> Tuple[str, str]:
+    """Phân loại exception LLM → (lý do chuẩn hóa, gợi ý khắc phục).
+
+    Hỗ trợ cả 2 họ exception:
+      - OpenAI SDK:    AuthenticationError(401) / PermissionDeniedError(403) /
+                       RateLimitError(429) — có thuộc tính ``status_code``.
+      - Google GenAI:  Unauthenticated / PermissionDenied / ResourceExhausted
+                       (google.api_core.exceptions.*) — phân loại qua tên class
+                       và HTTP code 400/401/403/429 lồng trong message.
+    """
+    cls_name = type(exc).__name__
+    combined = f"{cls_name} {exc}".lower()
+
+    status = getattr(exc, "status_code", None)
+    if not isinstance(status, int):
+        status = getattr(exc, "code", None)
+    try:
+        status = int(status)  # grpc codes cũng cast được nếu là int
+    except (TypeError, ValueError):
+        status = None
+
+    # --- API key sai / bị thu hồi ---
+    if (
+        status == 401
+        or "api_key_invalid" in combined
+        or "invalid api key" in combined
+        or "api key not valid" in combined
+        or "incorrect api key" in combined
+        or "authenticationerror" in combined
+        or "unauthenticated" in combined
+    ):
+        reason = REASON_API_KEY_INVALID
+    # --- Thiếu quyền ---
+    elif (
+        status == 403
+        or "permissiondenied" in combined
+        or "permission denied" in combined
+        or "forbidden" in combined
+    ):
+        reason = REASON_PERMISSION_DENIED
+    # --- Hết quota / rate limit ---
+    elif (
+        status == 429
+        or "resourceexhausted" in combined
+        or "rate limit" in combined
+        or "quota" in combined
+        or "too many requests" in combined
+    ):
+        reason = REASON_QUOTA_EXCEEDED
+    # --- Mạng / timeout ---
+    elif _is_transient_error(exc) or "timeout" in combined or "connection" in combined:
+        reason = REASON_NETWORK_TIMEOUT
+    # --- Parse/Validation đã cạn lần thử ---
+    elif isinstance(exc, (ValueError, json.JSONDecodeError)):
+        reason = REASON_OUTPUT_INVALID
+    else:
+        reason = REASON_UNKNOWN
+
+    model = getattr(settings, f"{provider_name.upper()}_MODEL", "")
+    hint = _HINTS_BY_REASON[reason].format(
+        key_env=f"{provider_name.upper()}_API_KEY",
+        model=model,
+    )
+    return reason, hint
+
+
+def _build_failure_message(failures: list) -> str:
+    """Sinh message HTTP 502 rõ ràng, an toàn, hướng dẫn người dùng hành động.
+
+    ``failures`` là list tuple (provider, reason, hint, raw_masked_error).
+    Luôn kèm LỖI GỐC (đã mask bí mật) để hiển thị thông báo thật từ Google /
+    OpenAI thay vì chỉ thấy câu chung chung.
+    """
+    lines = [
+        "Không thể sinh nội dung bằng AI — tất cả LLM provider đều thất bại.",
+    ]
+    for provider, reason, hint, raw in failures:
+        lines.append(f"• {provider.capitalize()}: {reason}. {hint}")
+        if raw:
+            lines.append(f"  ↳ Lỗi gốc: {raw}")
+    lines.append(
+        "Lưu ý: chế độ văn mẫu tự động (fallback) đã bị vô hiệu hóa để đảm bảo 100% "
+        "nội dung do AI sáng tạo, nên hệ thống không trả về bản slide kém chất lượng."
+    )
+    lines.append("Vui lòng kiểm tra API key / hạn mức (quota) rồi nhấn Tạo lại.")
+    return "\n".join(lines)
+
+
+# =============================================================================
+# FEW-SHOT EXAMPLES — DẠNG ABSTRACT (CHỈ DẠY CẤU TRÚC, CHỐNG CONTAMINATION)
+# =============================================================================
+# Các ví dụ CHỈ minh hoạ CẤU TRÚC JSON, nội dung là placeholder [TRONG NGOẶC
+# VUÔNG] rõ ràng để LLM không copy (chống lỗi Few-Shot Contamination như vụ
+# "Hệ Mặt Trời" lặp lại cho mọi chủ đề).
 
 _FEW_SHOT_EXAMPLE_1 = json.dumps({
-    "topic": "[CHỦ ĐỀ CỦA NGƯỜI DÙNG]",
+    "topic": "[CHỦ ĐỀ CỦA NGƯỜ DÙNG — viết lại ngắn gọn]",
     "slides": [
         {
             "slide_number": 1,
-            "section": "VẤN ĐỀ",
-            "slide_title": "[THÔNG ĐIỆP CỤ THỂ: vấn đề hoặc luận điểm + con số/mốc thời gian]",
+            "section": "[NHÃN MỤC viết hoa — bước 1 trong mạch kể của LĨNH VỰC đó]",
+            "slide_title": "[LUẬN ĐIỂM/KHẲNG ĐỊNH CỤ THỂ chứa thuật ngữ chuyên ngành + số liệu/mốc thời gian]",
             "cards": [
-                {"morph_id": "card_1", "title": "[THÔNG ĐIỆP CỤ THỂ 1]", "description": "[2-4 câu: dữ kiện định lượng hoặc mốc thời gian, ví dụ thực tế và quan hệ nhân quả của nó với chủ đề.]", "color_theme": "#8B5CF6", "order": 0},
-                {"morph_id": "card_2", "title": "[THÔNG ĐIỆP CỤ THỂ 2]", "description": "[2-4 câu: cơ chế hoặc luận điểm riêng biệt, kèm bằng chứng cụ thể và ý nghĩa thực tiễn.]", "color_theme": "#10B981", "order": 1},
-                {"morph_id": "card_3", "title": "[THÔNG ĐIỆP CỤ THỂ 3]", "description": "[2-4 câu: ví dụ hoặc số liệu liên quan trực tiếp, giải thích rõ bản chất vấn đề.]", "color_theme": "#06B6D4", "order": 2}
-            ]
+                {
+                    "morph_id": "card_1",
+                    "title": "[KHẲNG ĐỊNH CỤ THỂ 1: thực thể + đại lượng/sự kiện THẬT của chủ đề]",
+                    "description": "[2-4 câu diễn giải bằng GIỌNG CHUYÊN GIA của ngành: 3-4 thuật ngữ chuyên ngành + số liệu/đơn vị/ví dụ thật + quan hệ nhân quả. KHÔNG viết chung chung.]",
+                    "color_theme": "#8B5CF6",
+                    "order": 0,
+                },
+                {
+                    "morph_id": "card_2",
+                    "title": "[KHẲNG ĐỊNH CỤ THỂ 2: một chiều cạnh khác của chủ đề]",
+                    "description": "[2-4 câu: thuật ngữ + dẫn chứng + ý nghĩa thực tiễn, đúng chuyên môn ngành.]",
+                    "color_theme": "#10B981",
+                    "order": 1,
+                },
+                {
+                    "morph_id": "card_3",
+                    "title": "[KHẲNG ĐỊNH CỤ THỂ 3: sự thật/đối sánh/số liệu đáng chú ý]",
+                    "description": "[2-4 câu: thuật ngữ + con số/mốc thời gian + vì sao nó quan trọng.]",
+                    "color_theme": "#06B6D4",
+                    "order": 2,
+                },
+            ],
         },
         {
             "slide_number": 2,
-            "section": "NGUYÊN NHÂN",
-            "slide_title": "[THÔNG ĐIỆP CỤ THỂ KẾ TIẾP — mở rộng từ slide 1]",
+            "section": "[NHÃN MỤC viết hoa — bước 2 trong mạch kể]",
+            "slide_title": "[LUẬN ĐIỂM CỤ THỂ KẾ TIẾP — nối tiếp slide 1, không lặp lại]",
             "cards": [
-                {"morph_id": "card_1", "title": "[MỞ RỘNG THÔNG ĐIỆP 1]", "description": "[2-4 câu: phân tích nguyên nhân gốc rễ, dữ kiện và hệ quả cụ thể.]", "color_theme": "#8B5CF6", "order": 0},
-                {"morph_id": "card_2", "title": "[MỞ RỘNG THÔNG ĐIỆP 2]", "description": "[2-4 câu: rào cản và cơ chế vận hành, kèm ví dụ minh hoạ.]", "color_theme": "#10B981", "order": 1},
-                {"morph_id": "card_3", "title": "[MỞ RỘNG THÔNG ĐIỆP 3]", "description": "[2-4 câu: luận điểm bổ sung có dữ kiện và quan hệ nhân quả rõ ràng.]", "color_theme": "#06B6D4", "order": 2}
-            ]
-        }
-    ]
+                {
+                    "morph_id": "card_1",
+                    "title": "[MỞ RỘNG KHẲNG ĐỊNH 1]",
+                    "description": "[2-4 câu: đào sâu cơ chế/nguyên nhân, kèm thuật ngữ và dữ kiện định lượng.]",
+                    "color_theme": "#8B5CF6",
+                    "order": 0,
+                },
+                {
+                    "morph_id": "card_2",
+                    "title": "[MỞ RỘNG KHẲNG ĐỊNH 2]",
+                    "description": "[2-4 câu: case study/ví dụ thật, kèm thuật ngữ và sự kiện cụ thể.]",
+                    "color_theme": "#10B981",
+                    "order": 1,
+                },
+                {
+                    "morph_id": "card_3",
+                    "title": "[MỞ RỘNG KHẲNG ĐỊNH 3]",
+                    "description": "[2-4 câu: hệ quả/ý nghĩa, kèm thuật ngữ và quan hệ nhân quả.]",
+                    "color_theme": "#06B6D4",
+                    "order": 2,
+                },
+            ],
+        },
+    ],
 }, ensure_ascii=False, indent=2)
 
 _FEW_SHOT_EXAMPLE_2 = json.dumps({
-    "topic": "[CHỦ ĐỀ KHÁC CỦA NGƯỜI DÙNG]",
+    "topic": "[CHỦ ĐỀ KHÁC CỦA NGƯỜ DÙNG]",
     "slides": [
         {
             "slide_number": 1,
-            "section": "HÀNH ĐỘNG",
-            "slide_title": "[THÔNG ĐIỆP CỤ THỂ: lộ trình hoặc kế hoạch hành động]",
+            "section": "[NHÃN MỤC viết hoa]",
+            "slide_title": "[LUẬN ĐIỂM CỤ THỂ dạng lộ trình/chu trình 4 bước]",
             "cards": [
-                {"morph_id": "card_1", "title": "[BƯỚC 1 — thông điệp cụ thể]", "description": "[2-4 câu: hành động đầu tiên, người chịu trách nhiệm và mốc thời gian.]", "color_theme": "#8B5CF6", "order": 0},
-                {"morph_id": "card_2", "title": "[BƯỚC 2 — thông điệp cụ thể]", "description": "[2-4 câu: bước tiếp theo, nguồn lực cần và tiêu chí hoàn thành.]", "color_theme": "#10B981", "order": 1},
-                {"morph_id": "card_3", "title": "[BƯỚC 3 — thông điệp cụ thể]", "description": "[2-4 câu: triển khai thí điểm và cách đo lường kết quả.]", "color_theme": "#06B6D4", "order": 2},
-                {"morph_id": "card_4", "title": "[BƯỚC 4 — thông điệp cụ thể]", "description": "[2-4 câu: đánh giá, học hỏi và nhân rộng mô hình thành công.]", "color_theme": "#EC4899", "order": 3}
-            ]
-        }
-    ]
+                {
+                    "morph_id": "card_1",
+                    "title": "[GIAI ĐOẠN 1 — khẳng định cụ thể + mốc thời gian thật]",
+                    "description": "[2-4 câu: bản chất giai đoạn, thuật ngữ chuyên ngành, sự kiện/số liệu minh chứng.]",
+                    "color_theme": "#8B5CF6",
+                    "order": 0,
+                },
+                {
+                    "morph_id": "card_2",
+                    "title": "[GIAI ĐOẠN 2 — khẳng định cụ thể + mốc thời gian thật]",
+                    "description": "[2-4 câu: bản chất giai đoạn, thuật ngữ chuyên ngành, sự kiện/số liệu minh chứng.]",
+                    "color_theme": "#10B981",
+                    "order": 1,
+                },
+                {
+                    "morph_id": "card_3",
+                    "title": "[GIAI ĐOẠN 3 — khẳng định cụ thể + mốc thời gian thật]",
+                    "description": "[2-4 câu: bản chất giai đoạn, thuật ngữ chuyên ngành, sự kiện/số liệu minh chứng.]",
+                    "color_theme": "#06B6D4",
+                    "order": 2,
+                },
+                {
+                    "morph_id": "card_4",
+                    "title": "[GIAI ĐOẠN 4 — khẳng định cụ thể + mốc thời gian thật]",
+                    "description": "[2-4 câu: bản chất giai đoạn, thuật ngữ chuyên ngành, sự kiện/số liệu minh chứng.]",
+                    "color_theme": "#EC4899",
+                    "order": 3,
+                },
+            ],
+        },
+    ],
 }, ensure_ascii=False, indent=2)
 
 
-# ==============================================================================
-# SYSTEM PROMPT (v4 — Topic Adherence ƯU TIÊN SỐ 1)
-# ==============================================================================
-# ⚠️ KHÔNG dùng f-string cho phần JSON examples để tránh xung đột ngoặc nhọn
-# với Python format. Examples được gắn vào bằng .replace() ở cuối, an toàn 100%.
+# =============================================================================
+# SYSTEM PROMPT (v5 — DYNAMIC PERSONA + DOMAIN VOCABULARY + STRICT BAN)
+# =============================================================================
+# Ghi chú kỹ thuật: phần examples được gắn bằng .replace() ở cuối thay vì
+# f-string để tránh xung đột dấu ngoặc nhọn với cú pháp format của Python.
 
-SYSTEM_PROMPT_TEMPLATE = """Bạn là "Executive Presentation Architect" — kiến trúc sư nội dung trình chiếu hàng đầu, chuyên viết nội dung PowerPoint có hiệu ứng Morph đạt chuẩn Apple Keynote / McKinsey: sâu, thực tế, mỗi tiêu đề là một thông điệp.
-
-══════════════════════════════════════════════════════════════════════
-🚨 QUY TẮC QUAN TRỌNG NHẤT — TOPIC ADHERENCE (KHÔNG ĐƯỢC VI PHẠM) 🚨
-══════════════════════════════════════════════════════════════════════
-
-1. **BÁM SÁT 100% CHỦ ĐỀ NGƯỜI DÙNG** — nội dung nằm giữa hai dòng
-   "=== USER TOPIC TO GENERATE ===" và "=== END OF USER TOPIC ===" bên dưới.
-2. **KHÔNG bịa nội dung chung chung, KHÔNG copy placeholder/số liệu từ ví dụ.**
-   Mọi chữ trong ngoặc vuông [NHƯ THẾ NÀY] phải được thay bằng nội dung THẬT
-   liên quan trực tiếp đến USER TOPIC.
-3. `topic` PHẢI là đúng chủ đề người dùng nhập (hoặc tóm tắt đúng chủ đề đó).
+SYSTEM_PROMPT_TEMPLATE = """Bạn là UNIVERSAL DOMAIN EXPERT — hệ thống AI chuyên sinh nội dung trình chiếu đạt chuẩn TED/Keynote. Trước khi viết BẤT KỲ CHỮ NÀO, bạn phải làm 2 việc: (1) nhận diện lĩnh vực của chủ đề, (2) NHẬP VAI chuyên gia hàng đầu lĩnh vực đó.
 
 ══════════════════════════════════════════════════════════════════════
-🚫 STRICT BAN LIST — TUYỆT ĐỐI KHÔNG DÙNG (title, slide_title, section):
-══════════════════════════════════════════════════════════════════════
-"Giới thiệu chủ đề", "Điểm nổi bật", "Cấu trúc bài", "Yếu tố cốt lõi", "Tổng quan",
-"Phân tích chuyên sâu", "Dữ liệu & Bằng chứng", "Giải pháp/Công nghệ", "Tác động chính",
-"Chỉ số đo lường", "Đặc điểm", "Thành phần", "Lộ trình triển khai", "Kết luận"
-(kể cả biến thể viết hoa, dịch tương đương, hoặc tiêu đề không nói rõ đối tượng).
-
-══════════════════════════════════════════════════════════════════════
-NỘI DUNG SÂU & THỰC TẾ (DEEP CONTENT RULES)
+BƯỚC 1 — NHẬP VAI CHUYÊN GIA (DYNAMIC ROLEPLAY) — BẮT BUỘC
 ══════════════════════════════════════════════════════════════════════
 
-A. **MỖI TIÊU ĐỀ LÀ MỘT THÔNG ĐIỆP CỤ THỂ**, không phải nhãn danh mục.
-   - ĐÚNG:  "Doanh thu tăng 35% nhờ mở rộng thị trường".
-   - SAI:   "Tình hình doanh thu".
-   - `title` dài 2-10 từ, chứa thực thể/thuật ngữ của chủ đề và thường kèm một
-     con số, mốc thời gian hoặc kết quả cụ thể.
+Đọc chủ đề trong vùng "=== USER TOPIC TO GENERATE ===" và tự đóng vai tương ứng:
+- Thiên văn / vũ trụ (vd "solar system") → NHÀ THIÊN VĂN HỌC: viết về Mặt Trời (1.989×10³⁰ kg, nhiệt độ lõi ~15 triệu °C), Thủy Tinh (Mercury, năm 88 ngày), Kim Tinh (Venus, hiệu ứng nhà kính mất kiểm soát), Trái Đất (1 AU ≈ 150 triệu km), quỹ đạo elip Kepler, vành đai tiểu hành tinh giữa Hỏa và Mộc Tinh, vệ tinh, sao chổi, bức xạ mặt trời...
+- Cà phê / nông sản / ẩm thực (vd "cà phê Việt Nam") → CHUYÊN GIA NÔNG NGHIỆP & THƯỞNG THỨC: Robusta (caffeine ~2.2-2.7%) vs Arabica (hương thơm phức, caffeine ~1.2-1.5%), thủ phủ Buôn Ma Thuột — Tây Nguyên, sơ chế ướt/khô/honey, rang medium/dark, crema, cupping, xuất khẩu top 2 thế giới...
+- Y học / sức khỏe → BÁC SĨ / NHÀ NGHIÊN CỨU Y SINH: cơ chế bệnh sinh, triệu chứng lâm sàng, phác đồ điều trị, nghiên cứu RCT, tỷ lệ mắc/tử vong...
+- Lịch sử / văn hóa → NHÀ SỬ HỌC: niên đại, triều đại, nhân vật, nhân-quả lịch sử, tư liệu...
+- Công nghệ / AI / phần mềm → KỸ SƯ TRƯỞNG / ARCHITECT: kiến trúc hệ thống, thuật toán, thông số kỹ thuật, benchmark, độ trễ, throughput...
+- Kinh tế / kinh doanh / khởi nghiệp → CHIẾN LƯỢC GIA CẤP CAO: doanh thu, tăng trưởng, thị phần, unit economics (CAC, LTV), dòng tiền...
+- Lĩnh vực KHÁC bất kỳ → chuyên gia tương đương của CHÍNH lĩnh vực đó.
 
-B. **CẤU TRÚC 2 PHẦN CHO MỖI THẺ**: (1) `title` = thông điệp ngắn gọn, cô đọng;
-   (2) `description` = đoạn diễn giải chi tiết 2-4 câu (20-60 từ) giải thích RÕ
-   bản chất: dữ kiện định lượng, mốc thời gian, đơn vị, ví dụ hoặc quan hệ nhân quả.
-   KHÔNG bịa số: nếu chưa chắc, nêu rõ phạm vi/điều kiện hoặc dùng kiến thức nền.
-
-C. **MẠCH KỂ CHUYỆN (NARRATIVE ARC)** — các slide liền mạch theo đúng thứ tự:
-   VẤN ĐỀ → NGUYÊN NHÂN GỐC RỄ → GIẢI PHÁP THỰC THI → KẾT QUẢ KỲ VỌNG → HÀNH ĐỘNG.
-   Slide sau tiếp nối luận điểm slide trước, không lặp lại, không rời rạc.
-   Ghi `section` là nhãn mục VIẾT HOA ngắn gọn thể hiện vị trí trong mạch trên
-   (vd "VẤN ĐỀ", "NGUYÊN NHÂN", "GIẢI PHÁP", "KẾT QUẢ", "HÀNH ĐỘNG").
-
-D. **SỐ THẺ LINH HOẠT THEO Ý**: 1 thẻ (tuyên bố lớn), 2 thẻ (so sánh hai bên),
-   3 thẻ (3 đặc điểm), 4 thẻ (4 bước lộ trình). Chọn số thẻ TỰ NHIÊN nhất với ý
-   đang trình bày; mỗi slide 1-4 thẻ.
+Sau khi nhập vai: toàn bộ ngôn ngữ, ví dụ, số liệu, thuật ngữ phải đậm chất GIỌNG CHUYÊN GIA của ngành đó, khâu nào cũng đúng kỷ cương chuyên môn — như thể người xem đang nghe chính chuyên gia thuyết trình. Nội dung phải LINH HOẠT theo chủ đề, TUYỆT ĐỐI KHÔNG kéo theo văn mẫu doanh nghiệp/B2B cho những chủ đề không phải kinh doanh.
 
 ══════════════════════════════════════════════════════════════════════
-CÁC QUY TẮC CẤU TRÚC (STRUCTURAL RULES)
+BƯỚC 2 — TOPIC ADHERENCE (BÁM SÁT CHỦ ĐỀ 100%)
 ══════════════════════════════════════════════════════════════════════
 
-1. **CHỈ NỘI DUNG, KHÔNG HÌNH HỌC**: KHÔNG trả `x/y/width/height`. Python tự tính.
-   Bạn chỉ quyết định: `section`, `slide_title`, và với mỗi card: `morph_id`,
-   `title`, `description`, `color_theme`, `order`.
-2. **MORPH_ID**: ngắn, gạch dưới, không dấu/khoảng trắng (vd "hero_card",
-   "kpi_revenue", "card_1"). GIỮ NGUYÊN morph_id giữa slide N và N+1 cho cùng
-   một đối tượng nội dung (để PowerPoint Morph nội suy mượt mà); thẻ mới dùng id mới.
-3. **MÀU color_theme**: là màu ACCENT tươi, bão hòa của thẻ (mã hex 6 ký tự có #).
-   - Futuristic: #8B5CF6 (tím), #06B6D4 (cyan), #EC4899 (hồng), #10B981 (ngọc bảo).
-   - Minimal:    #6366F1 (indigo), #38BDF8 (sky), #10B981 (ngọc bảo), #C9A227 (vàng đồng).
-   - Corporate:  #C9A227 (vàng đồng), #10B981 (ngọc bảo), #3A86FF (xanh), #B08D2E (đồng).
+1. Nội dung nằm giữa hai dòng "=== USER TOPIC TO GENERATE ===" và
+   "=== END OF USER TOPIC ===" là CHỦ ĐỀ DUY NHẤT được phép viết.
+2. KHÔNG copy nội dung/số liệu từ phần VÍ DỤ trong prompt này. Mọi chữ trong
+   ngoặc vuông [NHƯ THẾ NÀY] phải được thay thế bằng nội dung THẬT về chủ đề.
+3. Trường `topic` phải phản ánh đúng chủ đề người dùng nhập.
+
+══════════════════════════════════════════════════════════════════════
+🚫 STRICT BAN — CẤM TUYỆT ĐỐI (title, slide_title, section, description)
+══════════════════════════════════════════════════════════════════════
+
+CÁC MẪU CÂU "GHÉP TỪ VÔ NGHĨA" — chỉ chèn tên chủ đề vào khuôn trống, không
+chứa thông tin gì (kèm mọi biến thể viết hoa/viết lại tương đương):
+- "Vì sao [chủ đề] là ưu tiên số 1", "...trở thành ưu tiên chiến lược"
+- "Nhu cầu [chủ đề] đang tăng tốc", "Nhu cầu [chủ đề] đang gia tăng"
+- "Điểm nghẽn [chủ đề]", "Điểm nghẽn đang kìm hãm tiến độ"
+- "Cái giá của việc chần chừ"
+- "Các tổ chức chậm thích ứng đang tụt lại phía sau"
+CÁC NHÃN SÁO RỖNG: "Giớ thiệu chủ đề", "Điểm nổi bật", "Cấu trúc bài",
+"Yếu tố cốt lõi", "Tổng quan", "Phân tích chuyên sâu", "Dữ liệu & Bằng chứng",
+"Giải pháp/Công nghệ", "Tác động chính", "Chỉ số đo lường", "Đặc điểm",
+"Thành phần", "Lộ trình triển khai", "Kết luận".
+→ Về bản chất: CẤM mọi câu chỉ cần thay tên chủ đề là chạy được ở mọi lĩnh
+vực. Mỗi câu viết phải GẮN CHẶT với chủ đề qua thuật ngữ/số liệu/sự thật riêng.
+
+══════════════════════════════════════════════════════════════════════
+BƯỚC 3 — DOMAIN VOCABULARY RULE (TỪ VỰNG CHUYÊN NGÀNH — BẮT BUỘC)
+══════════════════════════════════════════════════════════════════════
+
+MỖI SLIDE phải chứa ÍT NHẤT 3 yếu tố chuyên ngành sau trong cụm title +
+description của các thẻ:
+(i)   THUẬT NGỮ KỸ THUẬT đúng ngành (vd "quỹ đạo elip", "sơ chế honey"),
+(ii)  SỐ LIỆU / ĐẠI LƯỢNG kèm đơn vị (vd "4,6 tỷ năm", "~225 triệu km"),
+(iii) SỰ THẬT / TÊN RIÊNG kiểm chứng được (vd "Buôn Ma Thuột", "định luật Kepler").
+KHÔNG bịa số liệu giả. Nếu không chắc, dùng kiến thức nền đã được kiểm chứng
+phổ biến của ngành, hoặc nêu phạm vi/ước lượng thận trọng ("ước tính", "khoảng").
+
+══════════════════════════════════════════════════════════════════════
+BƯỚC 4 — NỘI DUNG SÂU & MẠCH KỂ THEO LĨNH VỰC
+══════════════════════════════════════════════════════════════════════
+
+A. **MỖI TIÊU ĐỀ LÀ MỘT KHẲNG ĐỊNH CỤ THỂ**, không phải nhãn danh mục.
+   - ĐÚNG: "Kim Tinh nóng 465 °C dù ở xa Mặt Trời hơn Thủy Tinh".
+   - ĐÚNG: "Robusta chiếm ~90% diện tích cà phê Việt Nam".
+   - SAI:  "Tổng quan hệ mặt trời". / "Nhu cầu cà phê đang tăng tốc".
+   - `title` dài 2-10 từ; chứa thực thể/thuật ngữ của chính chủ đề.
+
+B. **THẺ GỒM 2 PHẦN**: `title` = khẳng định ngắn; `description` = đoạn diễn
+   giải 2-4 câu (20-60 từ) giải thích cơ chế, kèm thuật ngữ/số liệu/quan hệ
+   nhân quả như đã nêu ở BƯỚC 3.
+
+C. **MẠCH KỂ LINH HOẠT THEO LĨNH VỰC** — chọn mạch tự nhiên nhất:
+   - KHOA HỌC / KHÁM PHÁ: Khái quát → Cấu tạo/Thành phần → Cơ chế vận hành →
+     Điểm kỳ thú / Khám phá mới → Ý nghĩa.
+   - LỊCH SỬ / VĂN HÓA: Bối cảnh → Diễn biến chính → Bước ngoặt → Hệ quả → Di sản.
+   - Y KHOA / SỨC KHỎE: Căn nguyên → Cơ chế → Biểu hiện → Phòng ngừa → Điều trị.
+   - CÔNG NGHỆ: Thành phần/Kiến trúc → Nguyên lý hoạt động → Ứng dụng →
+     Tác động → Hướng phát triển.
+   - ẨM THỰC / NÔNG SẢN: Nguồn gốc/Giống & vùng trồng → Canh tác/Thu hoạch →
+     Sơ chế/Chế biến → Phẩm vị/Trải nghiệm → Vị thế thị trường.
+   - KINH DOANH (chỉ khi chủ đề thật sự là kinh doanh): Vấn đề → Nguyên nhân →
+     Giải pháp → Kết quả → Hành động.
+   - Slide sau nối tiếp slide trước, không rời rạc, không lặp lại.
+   - `section` = nhãn mục VIẾT HOA ngắn gọn thể hiện vị trí trong mạch đã chọn
+     (vd "CẤU TẠO", "CƠ CHẾ", "SƠ CHẾ", "DI SẢN"...), KHÔNG dùng nhãn sáo rỗng
+     đã liệt kê trong STRICT BAN.
+
+D. **SỐ THẺ LINH HOẠT THEO Ý**: 1 thẻ (khẳng định lớn), 2 thẻ (đối chiếu hai
+   phía), 3 thẻ (3 khía cạnh), 4 thẻ (4 giai đoạn). Mỗi slide 1-4 thẻ, chọn số
+   thẻ TỰ NHIÊN nhất với ý đang trình bày.
+
+══════════════════════════════════════════════════════════════════════
+BƯỚC 5 — CÁC QUY TẮC CẤU TRÚC JSON (STRUCTURAL RULES)
+══════════════════════════════════════════════════════════════════════
+
+1. **CHỈ NỘI DUNG, KHÔNG HÌNH HỌC**: KHÔNG trả `x/y/width/height` — Python tự
+   tính tọa độ. Bạn chỉ quyết định: `section`, `slide_title`, và mỗi card có
+   `morph_id`, `title`, `description`, `color_theme`, `order`.
+2. **MORPH_ID**: ngắn, chữ thường gạch dưới, không dấu/khoảng trắng (vd
+   "hero_card", "orbit_card", "card_1"). GIỮ NGUYÊN morph_id giữa slide N và
+   N+1 cho cùng một đối tượng nội dung (để PowerPoint Morph nội suy mượt);
+   thẻ mới dùng id mới.
+3. **MÀU color_theme** = màu ACCENT tươi, bão hòa (hex 6 ký tự, kèm #):
+   - Futuristic: #8B5CF6 (tím), #06B6D4 (cyan), #EC4899 (hồng), #10B981 (ngọc).
+   - Minimal:    #6366F1 (indigo), #38BDF8 (sky), #10B981 (ngọc), #C9A227 (vàng đồng).
+   - Corporate:  #C9A227 (vàng đồng), #10B981 (ngọc), #3A86FF (xanh), #B08D2E (đồng).
    - Creative:   #EC4899 (hồng), #F59E0B (cam), #06B6D4 (cyan), #8B5CF6 (tím).
-   Thẻ đầu tiên (điểm nhấn) dùng màu accent chủ đạo; các thẻ sau đổi màu xen kẽ.
-4. **NGÔN NGỮ**: toàn bộ nội dung theo ngôn ngữ yêu cầu ("vi" → tiếng Việt tự nhiên,
-   "en" → English). Không dịch từng chữ.
-5. **SỐ LƯỢNG SLIDE**: trả ĐÚNG số slide người dùng yêu cầu (không hơn, không kém).
-6. **ĐỊNH DẠNG**: trả DUY NHẤT một JSON object hợp lệ, không code fence, không giải thích.
+   Thẻ đầu tiên (điểm nhấn) dùng màu accent chính; các thẻ sau đổi màu xen kẽ.
+4. **NGÔN NGỮ**: toàn bộ nội dung theo ngôn ngữ yêu cầu ("vi" → Tiếng Việt tự
+   nhiên, "en" → English), thuật ngữ quốc tế dùng đúng chuẩn ngành.
+5. **SỐ LƯỢNG SLIDE**: trả ĐÚNG số slide người dùng yêu cầu.
+6. **ĐỊNH DẠNG**: trả DUY NHẤT một JSON object hợp lệ — không code fence,
+   không giải thích, không chữ thừa trước/sau JSON.
 
 ══════════════════════════════════════════════════════════════════════
-[VÍ DỤ MINH HOẠ CẤU TRÚC — NỘI DUNG LÀ PLACEHOLDER, KHÔNG ĐƯỢC SAO CHÉP]
+[VÍ DỤ MINH HOẠ CẤU TRÚC — TOÀN BỘ NỘI DUNG LÀ PLACEHOLDER, TUYỆT ĐỐI
+KHÔNG SAO CHÉP; PHẢI THAY BẰNG NỘI DUNG THẬT VỀ USER TOPIC]
 ══════════════════════════════════════════════════════════════════════
 
-VÍ DỤ 1 — 2 slide, 3 thẻ/slide, morph_id giữ nguyên giữa 2 slide.
-(Thay [CHỮ TRONG NGOẶC VUÔNG] bằng nội dung THẬT về USER TOPIC):
+VÍ DỤ 1 — 2 slide, 3 thẻ/slide, morph_id giữ nguyên cho cùng đối tượng:
 
 __EXAMPLE_1__
 
 ---
-VÍ DỤ 2 — 1 slide dạng lộ trình 4 bước (4 thẻ), minh hoạ số thẻ linh hoạt:
+VÍ DỤ 2 — 1 slide dạng chu trình/lộ trình 4 giai đoạn (4 thẻ):
 
 __EXAMPLE_2__
 
 ══════════════════════════════════════════════════════════════════════
 HÃY BẮT ĐẦU
 ══════════════════════════════════════════════════════════════════════
-Đọc kỹ "=== USER TOPIC TO GENERATE ===", viết nội dung 100% bám sát chủ đề đó,
-theo đúng mạch kể chuyện và cấu trúc JSON đã minh hoạ.
+Đọc kỹ "=== USER TOPIC TO GENERATE ===", NHẬP VAI chuyên gia đúng lĩnh vực,
+viết nội dung 100% bám sát chủ đề bằng từ vựng chuyên ngành thật, theo đúng
+cấu trúc JSON đã minh hoạ.
 """
 
-# Gắn abstract examples vào SYSTEM_PROMPT (không dùng f-string cho examples
-# để tránh xung đột nếu example có chứa { } — dù đã json.dumps an toàn, cách
-# này rõ ràng và phòng thủ tuyệt đối).
 SYSTEM_PROMPT = (
     SYSTEM_PROMPT_TEMPLATE
     .replace("__EXAMPLE_1__", _FEW_SHOT_EXAMPLE_1)
@@ -200,9 +481,9 @@ SYSTEM_PROMPT = (
 )
 
 
-# ==============================================================================
-# HELPERS
-# ==============================================================================
+# =============================================================================
+# HELPERS — Trích JSON, phân loại lỗi tạm thời, retry backoff
+# =============================================================================
 
 def _extract_json_object(text: str) -> dict:
     """Trích JSON object đầu tiên từ phản hồi LLM (chịu lỗi markdown fence)."""
@@ -224,7 +505,7 @@ def _extract_json_object(text: str) -> dict:
     except json.JSONDecodeError:
         pass
 
-    # Quét ngoặc cân bằng
+    # Quét ngoặc cân bằng để lấy object lồng đầu tiên hợp lệ
     start = cleaned.find("{")
     while start != -1:
         depth = 0
@@ -260,14 +541,16 @@ def _extract_json_object(text: str) -> dict:
 
 
 def _is_transient_error(exc: Exception) -> bool:
-    """Phân loại lỗi tạm thời (đáng retry) vs lỗi logic."""
+    """Phân loại lỗi tạm thời (đáng retry) vs lỗi logic (retry cũng vô ích)."""
     status = getattr(exc, "status_code", None)
     if isinstance(status, int) and status in (408, 429, 500, 502, 503, 504):
         return True
-    name = type(exc).__name__
+    name = type(exc).__name__.lower()
     return name in {
-        "APIConnectionError", "APITimeoutError", "APIConnectionTimeoutError",
-        "TimeoutError", "ConnectError", "ReadTimeout", "RemoteProtocolError",
+        "apiconnectionerror", "apitimeouterror", "apiconnectiontimeouterror",
+        "timeouterror", "connecterror", "readtimeout", "remoteprotocolerror",
+        "serviceunavailable", "internalservererror",
+        "resourceexhausted",  # Gemini 429 — vẫn đáng 1 lần retry backoff dài
     }
 
 
@@ -275,7 +558,7 @@ async def _call_with_retry(
     provider_name: str,
     operation: Callable[[], Any],
 ) -> Any:
-    """Gọi LLM với retry + exponential backoff cho lỗi tạm thời."""
+    """Gọi LLM với retry + exponential backoff CHỈ cho lỗi tạm thời (mạng/5xx/429)."""
     last_exc: Optional[Exception] = None
     for attempt in range(1, LLM_MAX_ATTEMPTS + 1):
         try:
@@ -300,9 +583,14 @@ async def _call_with_retry(
     raise last_exc  # pragma: no cover
 
 
-# ==============================================================================
+def _temperature_for_attempt(attempt: int) -> float:
+    """Temperature theo thang TEMPERATURE_LADDER cho lần thử thứ ``attempt`` (1-based)."""
+    return TEMPERATURE_LADDER[min(max(attempt - 1, 0), len(TEMPERATURE_LADDER) - 1)]
+
+
+# =============================================================================
 # OPENAI CLIENT
-# ==============================================================================
+# =============================================================================
 _openai_client: Optional[Any] = None
 
 
@@ -313,27 +601,24 @@ def _get_openai_client() -> Any:
         _openai_client = AsyncOpenAI(
             api_key=settings.OPENAI_API_KEY,
             timeout=LLM_REQUEST_TIMEOUT_S,
-            max_retries=0,
+            max_retries=0,  # retry do _call_with_retry kiểm soát
         )
     return _openai_client
 
 
 def _build_user_prompt(req: GenerateRequest) -> str:
-    """Xây dựng user prompt — CHUẨN HÓA THEO DẠNG DELIMITER RÕ RÀNG.
+    """Xây dựng user prompt — đặt chủ đề giữa 2 DELIMITER độc đáo.
 
-    ⚠️ CRITICAL: Biến req.prompt được đặt giữa 2 dòng delimiter độc đáo để
-    LLM không bị nhầm lẫn đâu là yêu cầu thật, đâu là system instruction.
-    Đây là fix then chốt cho lỗi "user prompt bị trôi / bị bỏ qua".
+    Delimiter rõ ràng giúp LLM không nhầm lẫn đâu là yêu cầu thật, đâu là
+    system instruction, và log audit kiểm tra prompt có bị trôi hay không.
     """
-    lang = "Tiếng Việt" if req.language.lower().startswith("vi") else "English"
+    lang = "Tiếng Việt" if (req.language or "vi").lower().startswith("vi") else "English"
 
-    # Log audit: in ra để dev kiểm tra prompt có được truyền nguyên vẹn hay không
     logger.info(
         "Building user prompt | prompt=%r | num_slides=%d | style=%s | lang=%s",
         req.prompt[:120], req.num_slides, req.style, lang,
     )
 
-    # Dùng delimiter độc đáo (bằng =, không phải ngoặc nhọn) để không xung đột JSON
     return (
         "================================================================\n"
         "=== USER TOPIC TO GENERATE ===\n"
@@ -346,18 +631,20 @@ def _build_user_prompt(req: GenerateRequest) -> str:
         f"- Số lượng slide cần tạo (BẮT BUỘC đúng): {req.num_slides}\n"
         f"- Phong cách thiết kế: {req.style}\n"
         f"- Tỉ lệ khung hình: {req.aspect_ratio}\n"
-        f"- Ngôn ngữ nội dung (toàn bộ title/description phải dùng ngôn ngữ này): {lang}\n"
+        f"- Ngôn ngữ nội dung (toàn bộ title/description dùng ngôn ngữ này): {lang}\n"
         f"- Sinh speaker notes: {'Có' if req.include_speaker_notes else 'Không'}\n\n"
-        "HÃY NHỚ LẠI QUY TẮT SỐ 1: Mọi nội dung (topic, slide_title, title, description) "
-        "phải BÁM SÁT 100% chủ đề trong vùng === USER TOPIC TO GENERATE === ở trên. "
-        "KHÔNG sao chép nội dung từ ví dụ, KHÔNG bịa nội dung chung chung. "
+        "NHẮC LẠI TRỰC TIẾP: Trước hết NHẬP VAI chuyên gia đúng lĩnh vực của "
+        "chủ đề trên; mọi nội dung (topic, slide_title, title, description) phải "
+        "BÁM SÁT 100% chủ đề đó với từ vựng chuyên ngành thật; tuyệt đối không "
+        "dùng các mẫu câu trong STRICT BAN (\"Nhu cầu ... tăng tốc\", "
+        "\"Điểm nghẽn ...\", \"ưu tiên số 1\"...), không copy nội dung ví dụ. "
         "Trả về đúng JSON schema LLMOutput, không markdown fence, không giải thích."
     )
 
 
-# ==============================================================================
-# PARSER with PYDANTIC VALIDATION RETRY
-# ==============================================================================
+# =============================================================================
+# VALIDATION & CONTENT SMELL CHECK
+# =============================================================================
 
 def _validate_llm_output(data: dict) -> LLMOutput:
     """Validate dữ liệu thô bằng Pydantic LLMOutput strict schema."""
@@ -374,105 +661,172 @@ def _validate_llm_output(data: dict) -> LLMOutput:
                     errors.append(f"- Tại '{loc}': {msg}")
         except Exception:  # noqa: BLE001
             errors.append(str(exc)[:300])
-        error_msg = "Pydantic Validation Error:\n" + "\n".join(errors[:5])
-        raise ValueError(error_msg) from exc
+        if not errors:
+            errors = [str(exc)[:300]]
+        raise ValueError("Pydantic Validation Error:\n" + "\n".join(errors[:5])) from exc
 
 
-# Kiểm tra nhanh nội dung topic xem có bị nhiễm placeholder hay không
-def _content_smell_check(result: LLMOutput, original_prompt: str) -> None:
-    """Cảnh báo nếu nội dung có dấu hiệu bị nhiễm few-shot placeholder."""
-    suspicious_tokens = [
-        "[VÍ DỤ", "[NỘI DUNG VÍ DỤ", "[CHỦ ĐỀ", "[TIÊU ĐỀ", "[NỘI DUNG",
-        "VÍ DỤ MINH HOẠ", "KHÔNG SAO CHÉP", "PLACEHOLDER", "[TÊN CHỦ ĐỀ",
-    ]
+# Các cụm văn mẫu B2B rác/phần placeholder bị cấm — dùng để reject nội dung
+# (và đưa vào retry feedback) nếu LLM vẫn vi phạm STRICT BAN.
+_BANNED_TEMPLATE_TOKENS = [
+    "nhu cầu", "đang tăng tốc", "đang gia tăng", "điểm nghẽn", "kìm hãm",
+    "cái giá của việc chần chừ", "cái giá chần chừ", "ưu tiên số 1",
+    "ưu tiên chiến lược", "ưu tiên chiến lược số một", "tụt lại phía sau",
+]
+
+_PLACEHOLDER_TOKENS = [
+    "[VÍ DỤ", "[CHỦ ĐỀ", "[TIÊU ĐỀ", "[NỘI DUNG", "[KHẲNG ĐỊNH",
+    "VÍ DỤ MINH HOẠ", "KHÔNG SAO CHÉP", "PLACEHOLDER",
+]
+
+
+def _content_smell_check(result: LLMOutput, original_prompt: str) -> list:
+    """Quét nhanh dấu hiệu nội dung rác; trả về danh sách vi phạm (rỗng = sạch).
+
+    Kết quả được dùng để (a) log cảnh báo và (b) đưa vào feedback retry nếu
+    vi phạm STRICT BAN — LLM sẽ bị yêu cầu viết lại thay vì âm thầm chấp nhận.
+    """
     combined = (result.topic or "").lower()
     for s in result.slides:
-        combined += " " + (s.slide_title or "").lower()
+        combined += " " + (s.section or "").lower() + " " + (s.slide_title or "").lower()
         for c in s.cards:
             combined += " " + (c.title or "").lower() + " " + (c.description or "").lower()
-    hits = [t for t in suspicious_tokens if t.lower() in combined]
-    if hits:
-        logger.warning(
-            "Nội dung LLM có dấu hiệu nhiễm placeholder tokens=%s — có thể model chưa tuân thủ topic adherence.",
-            hits,
-        )
-    # Kiểm tra topic có khớp với user prompt không (so sánh đơn giản token overlap)
-    prompt_tokens = set(w for w in original_prompt.lower().split() if len(w) >= 3)
-    topic_tokens = set(w for w in (result.topic or "").lower().split() if len(w) >= 3)
-    if prompt_tokens and topic_tokens and not (prompt_tokens & topic_tokens):
-        logger.warning(
-            "Topic kết quả '%s' không chia sẻ từ khoá nào với user prompt '%s' — có thể lệch chủ đề.",
-            result.topic[:60], original_prompt[:60],
-        )
 
+    hits = [t for t in _PLACEHOLDER_TOKENS if t.lower() in combined]
+    if hits:
+        logger.warning("Nội dung LLM nhiễm placeholder tokens=%s", hits)
+
+    banned_hits = [t for t in _BANNED_TEMPLATE_TOKENS if t in combined]
+    if banned_hits:
+        logger.warning(
+            "Nội dung LLM dính văn mẫu B2B bị cấm tokens=%s — sẽ yêu cầu LLM viết lại.",
+            banned_hits,
+        )
+    else:
+        # Kiểm tra nhẹ topic có chia sẻ từ khóa với user prompt (phát hiện lệch chủ đề)
+        prompt_tokens = {w for w in original_prompt.lower().split() if len(w) >= 3}
+        topic_tokens = {w for w in (result.topic or "").lower().split() if len(w) >= 3}
+        if prompt_tokens and topic_tokens and not (prompt_tokens & topic_tokens):
+            logger.warning(
+                "Topic kết quả %r không chia sẻ từ khóa nào với user prompt %r — có thể lệch chủ đề.",
+                result.topic[:60], original_prompt[:60],
+            )
+    return hits + banned_hits
+
+
+# =============================================================================
+# PIPELINE: GỌI LLM → PARSE → VALIDATE → SMELL CHECK (retry với thang nhiệt độ)
+# =============================================================================
 
 async def _parse_with_retry(
-    raw_text_getter: Callable[[list], Any],
+    raw_text_getter: Callable[[list, float], Any],
     build_messages: Callable[[str], list],
     req: GenerateRequest,
     provider: str,
 ) -> LLMOutput:
-    """Pipeline: gọi LLM -> trích JSON -> validate Pydantic -> content smell check."""
-    last_validation_error: Optional[str] = None
+    """Gọi LLM → trích JSON → validate Pydantic → reject nội dung vi phạm.
+
+    Mỗi lần thử lại dùng temperature khác nhau (xem TEMPERATURE_LADDER) và kèm
+    feedback lỗi cụ thể vào prompt lần sau. Chỉ raise khi cạn toàn bộ lần thử.
+    """
+    last_error: Optional[str] = None
 
     for attempt in range(1, MAX_VALIDATION_RETRIES + 2):
+        temperature = _temperature_for_attempt(attempt)
         user_prompt_text = _build_user_prompt(req)
 
-        if last_validation_error is not None:
+        if last_error is not None:
             user_prompt_text = (
                 user_prompt_text
-                + f"\n\n=== LỖI LẦN TRƯỚC (HÃY SỬA) ===\n{last_validation_error}\n\n"
-                + "Hãy trả về JSON ĐÃ SỬA, bám sát USER TOPIC, đúng schema, không giải thích."
+                + f"\n\n=== LỖI LẦN TRƯỚC (HÃY SỬA) ===\n{last_error}\n\n"
+                + "Hãy trả về JSON ĐÃ SỬA: nhập vai chuyên gia đúng lĩnh vực, dùng "
+                + "từ vựng chuyên ngành thật, không dùng văn mẫu bị cấm, đúng schema, "
+                + "không giải thích."
             )
 
         messages = build_messages(user_prompt_text)
 
-        try:
-            raw_text = await raw_text_getter(messages)
-        except Exception:
-            raise
+        # --- Gọi LLM (lỗi API ném thẳng ra → xử lý/phân loại ở entry point) ---
+        raw_text = await raw_text_getter(messages, temperature)
 
-        # Parse JSON
+        # --- Parse JSON ---
         try:
             data = _extract_json_object(raw_text or "")
         except ValueError as exc:
-            last_validation_error = f"Lỗi parse JSON: {exc}"
-            logger.warning("%s parse JSON lỗi (lần %d): %s", provider, attempt, last_validation_error)
+            last_error = f"Lỗi parse JSON: {exc}"
+            logger.warning(
+                "%s parse JSON lỗi (lần %d, temp=%.1f): %s — raw 200 ký tự đầu: %r",
+                provider, attempt, temperature, last_error,
+                _mask_sensitive((raw_text or "")[:200]),
+            )
             if attempt > MAX_VALIDATION_RETRIES:
+                logger.exception(
+                    "%s parse JSON thất bại sau %d lần thử — FULL TRACEBACK:",
+                    provider, attempt,
+                )
                 raise
             await asyncio.sleep(LLM_RETRY_BASE_DELAY_S * attempt)
             continue
 
-        # Validate Pydantic
+        # --- Validate Pydantic ---
         try:
             result = _validate_llm_output(data)
-            # Smell check (chỉ warning, không fail)
-            _content_smell_check(result, req.prompt)
-            logger.info(
-                "%s đã sinh thành công %d slide (topic=%r, lần %d)",
-                provider, len(result.slides), result.topic[:60], attempt,
-            )
-            return result
         except ValueError as exc:
-            last_validation_error = str(exc)
+            last_error = str(exc)
             logger.warning(
-                "%s Pydantic validation lỗi (lần %d): %s",
-                provider, attempt, last_validation_error[:200],
+                "%s Pydantic validation lỗi (lần %d, temp=%.1f): %s",
+                provider, attempt, temperature, last_error[:200],
             )
             if attempt > MAX_VALIDATION_RETRIES:
+                logger.exception(
+                    "%s Pydantic validation thất bại sau %d lần thử — FULL TRACEBACK:",
+                    provider, attempt,
+                )
                 raise
             await asyncio.sleep(LLM_RETRY_BASE_DELAY_S * attempt)
+            continue
+
+        # --- STRICT BAN smell check: vi phạm cũng bị coi là thất bại mềm ---
+        violations = _content_smell_check(result, req.prompt)
+        if violations and attempt <= MAX_VALIDATION_RETRIES:
+            last_error = (
+                "Nội dung VI PHẠM STRICT BAN / còn placeholder: "
+                + ", ".join(sorted(set(violations))[:8])
+                + ". TUYỆT ĐỐI không dùng các cụm trên — hãy viết lại bằng "
+                + "khẳng định cụ thể với thuật ngữ/số liệu chuyên ngành của chủ đề."
+            )
+            logger.info(
+                "%s yêu cầu viết lại do vi phạm STRICT BAN (lần %d, temp=%.1f): %s",
+                provider, attempt, temperature, violations,
+            )
+            await asyncio.sleep(LLM_RETRY_BASE_DELAY_S * attempt)
+            continue
+
+        logger.info(
+            "%s đã sinh thành công %d slide (topic=%r, lần %d, temp=%.1f)",
+            provider, len(result.slides), result.topic[:60], attempt, temperature,
+        )
+        return result
 
     raise RuntimeError("Unreachable: retry loop exhausted")
 
 
-# ==============================================================================
+# =============================================================================
 # PROVIDER IMPLEMENTATIONS
-# ==============================================================================
+# =============================================================================
 
 async def _generate_with_openai(req: GenerateRequest) -> LLMOutput:
-    """Gọi OpenAI với Structured Output + temperature=0.4."""
-    logger.info("Gọi OpenAI %s (Structured Output, temp=%.1f)...", settings.OPENAI_MODEL, LLM_TEMPERATURE)
+    """Gọi OpenAI JSON-schema structured output, temperature theo thang retry."""
+    if not settings.OPENAI_API_KEY or not settings.OPENAI_API_KEY.strip():
+        raise LLMConfigurationError(
+            "OPENAI_API_KEY đang trống hoặc chỉ gồm khoảng trắng — kiểm tra biến "
+            "môi trường của Backend (Render Env Vars / file .env)."
+        )
+    logger.info(
+        "Gọi OpenAI model=%r key=%s (đã mask)...",
+        settings.OPENAI_MODEL,
+        f"{settings.OPENAI_API_KEY[:4]}...****" if settings.OPENAI_API_KEY else "<trống>",
+    )
 
     client = _get_openai_client()
     json_schema = LLMOutput.model_json_schema()
@@ -484,9 +838,10 @@ async def _generate_with_openai(req: GenerateRequest) -> LLMOutput:
             {"role": "user", "content": user_content},
         ]
 
-    async def _raw_getter(messages: list) -> str:
+    async def _raw_getter(messages: list, temperature: float) -> str:
         async def _call():
             try:
+                # Đường ưu tiên: strict structured output (gpt-4o trở lên)
                 return await client.chat.completions.create(
                     model=settings.OPENAI_MODEL,
                     messages=messages,
@@ -498,14 +853,15 @@ async def _generate_with_openai(req: GenerateRequest) -> LLMOutput:
                             "schema": json_schema,
                         },
                     },
-                    temperature=LLM_TEMPERATURE,
+                    temperature=temperature,
                 )
             except Exception:  # noqa: BLE001
+                # Model cũ không hỗ trợ json_schema → rơi về json_object
                 return await client.chat.completions.create(
                     model=settings.OPENAI_MODEL,
                     messages=messages,
                     response_format={"type": "json_object"},
-                    temperature=LLM_TEMPERATURE,
+                    temperature=temperature,
                 )
         resp = await _call_with_retry("OpenAI", _call)
         return resp.choices[0].message.content if resp.choices else None
@@ -514,32 +870,93 @@ async def _generate_with_openai(req: GenerateRequest) -> LLMOutput:
 
 
 async def _generate_with_gemini(req: GenerateRequest) -> LLMOutput:
-    """Gọi Google Gemini với response_schema + temperature=0.4."""
-    logger.info("Gọi Gemini %s (Structured Output, temp=%.1f)...", settings.GEMINI_MODEL, LLM_TEMPERATURE)
+    """Gọi Google Gemini với response_schema, temperature theo thang retry."""
+    if not settings.GEMINI_API_KEY or not settings.GEMINI_API_KEY.strip():
+        # Không để SDK nổ với lỗi khó hiểu khi key rỗng/khoảng trắng.
+        raise LLMConfigurationError(
+            "GEMINI_API_KEY đang trống hoặc chỉ gồm khoảng trắng — kiểm tra biến "
+            "môi trường của Backend (Render Env Vars / file .env)."
+        )
+    _check_gemini_model_name()
+    logger.info(
+        "Gọi Gemini model=%r key=%s (đã mask)...",
+        settings.GEMINI_MODEL,
+        f"{settings.GEMINI_API_KEY[:4]}...****" if settings.GEMINI_API_KEY else "<trống>",
+    )
 
     import google.generativeai as genai
     genai.configure(api_key=settings.GEMINI_API_KEY)
 
-    generation_config = {
-        "response_mime_type": "application/json",
-        "response_schema": LLMOutput,
-        "temperature": LLM_TEMPERATURE,
-    }
+    gemini_schema = _gemini_response_schema()
 
-    model = genai.GenerativeModel(
-        model_name=settings.GEMINI_MODEL,
-        generation_config=generation_config,
-        system_instruction=SYSTEM_PROMPT,
-    )
+    def _build_model(temperature: float, use_schema: bool = True):
+        """Dựng model theo temperature của lần retry (object nhẹ, chỉ giữ config).
+
+        Trả về (model, system_instruction_ok) — SDK quá cũ (<0.5) không có
+        tham số system_instruction thì bam False để nhồi prompt vào user message.
+        """
+        generation_config = {
+            # BẮT BUỘC: ép Gemini trả về JSON chuẩn (yêu cầu debug #3).
+            "response_mime_type": "application/json",
+            "temperature": temperature,
+        }
+        if use_schema and gemini_schema is not None:
+            generation_config["response_schema"] = gemini_schema
+        try:
+            model = genai.GenerativeModel(
+                model_name=settings.GEMINI_MODEL,
+                generation_config=generation_config,
+                system_instruction=SYSTEM_PROMPT,
+            )
+            return model, True
+        except TypeError:
+            logger.warning(
+                "google-generativeai quá cũ để dùng system_instruction — "
+                "nhồi system prompt vào user message. Hãy nâng: pip install -U google-generativeai"
+            )
+            return genai.GenerativeModel(
+                model_name=settings.GEMINI_MODEL,
+                generation_config=generation_config,
+            ), False
 
     def _messages(user_content: str) -> list:
         return [user_content]
 
-    async def _raw_getter(messages: list) -> str:
+    async def _call_generate(model, has_system: bool, user_content: str):
+        content = user_content if has_system else f"{SYSTEM_PROMPT}\n\n{user_content}"
+        return await model.generate_content_async(content)
+
+    async def _raw_getter(messages: list, temperature: float) -> str:
+        model, has_system = _build_model(temperature, use_schema=True)
+
         async def _call():
-            return await model.generate_content_async(messages[0])
-        resp = await _call_with_retry("Gemini", _call)
-        return getattr(resp, "text", None)
+            return await _call_generate(model, has_system, messages[0])
+
+        try:
+            resp = await _call_with_retry("Gemini", _call)
+        except ValueError as exc:
+            if "Unknown field for Schema" not in str(exc):
+                raise
+            # SDK vẫn lằng nhằng với schema → gọi lại CHỈ với JSON mime-type.
+            logger.warning(
+                "Gemini SDK từ chối response_schema (%s) — thử lại chỉ với "
+                "response_mime_type=application/json.",
+                _summarize_exc(exc),
+            )
+            model, has_system = _build_model(temperature, use_schema=False)
+
+            async def _call_mime_only():
+                return await _call_generate(model, has_system, messages[0])
+
+            resp = await _call_with_retry("Gemini", _call_mime_only)
+
+        try:
+            return getattr(resp, "text", None)
+        except (ValueError, AttributeError) as exc:
+            # Gemini chặn nội dung (safety) hoặc rỗng → coi như output invalid
+            raise ValueError(
+                f"Gemini không trả về text hợp lệ (bị chặn hoặc rỗng): {exc}"
+            ) from exc
 
     return await _parse_with_retry(_raw_getter, _messages, req, "Gemini")
 
@@ -550,662 +967,207 @@ _PROVIDER_FUNCS = {
 }
 
 
+# =============================================================================
+# GEMINI SCHEMA SANITIZER — FIX "Unknown field for Schema: maxLength"
+# =============================================================================
+# google-generativeai (đặc biệt bản 0.4-0.5) KHÔNG chấp nhận JSON Schema đầy đủ
+# của Pydantic: mọi field như minLength/maxLength/pattern/$ref/$defs/maxItems/
+# default/title... đều khiến SDK raise "Unknown field for Schema: ..." NGAY KHI
+# gọi API — và đây chính là nguồn gốc khiến toàn bộ request Gemini thất bại ngay
+# từ nhịp đầu. Schema gửi lên Google chỉ được giữ các trường proto hợp lệ.
+
+_GEMINI_PROTO_SCHEMA_KEYS = {
+    "type", "format", "description", "nullable", "enum",
+    "items", "properties", "required",
+}
+
+_GEMINI_TYPE_NAME_MAP = {
+    "object": "OBJECT", "string": "STRING", "integer": "INTEGER",
+    "number": "NUMBER", "boolean": "BOOLEAN", "array": "ARRAY",
+}
+
+
+def _resolve_json_refs(node: Any, defs: dict) -> Any:
+    """Duỗi phẳng các tham chiếu {"$ref": "#/$defs/X"} (Gemini proto không hiểu $ref)."""
+    if isinstance(node, dict):
+        if "$ref" in node:
+            ref_name = str(node["$ref"]).split("/")[-1]
+            target = defs.get(ref_name)
+            if not isinstance(target, dict):
+                return {}
+            base = _resolve_json_refs(target, defs)
+            for key, value in node.items():
+                if key != "$ref":
+                    base[key] = _resolve_json_refs(value, defs)
+            return base
+        return {key: _resolve_json_refs(value, defs) for key, value in node.items()}
+    if isinstance(node, list):
+        return [_resolve_json_refs(item, defs) for item in node]
+    return node
+
+
+def _sanitize_for_gemini(node: Any) -> Any:
+    """Loại bỏ mọi trường JSON-Schema mà Gemini proto Schema không hỗ trợ.
+
+    Giữ lại: type/format/description/nullable/enum/items/properties/required
+    (đủ để model hiểu cấu trúc), đồng thờ chuẩn hóa tên kiểu sang dạng proto
+    (object → OBJECT, string → STRING...).
+    """
+    if isinstance(node, dict):
+        sanitized: dict = {}
+        for key, value in node.items():
+            if key == "type" and isinstance(value, str):
+                sanitized["type"] = _GEMINI_TYPE_NAME_MAP.get(value.lower(), value.upper())
+            elif key == "description" and isinstance(value, str):
+                # Claude/LLM đọc description để hiểu ràng buộc → giữ ngắn gọn ở ngoài,
+                # bản thân ràng buộc cứng (minLength...) do Pydantic phía server kiểm.
+                sanitized["description"] = value[:1000]
+            elif key in ("nullable", "format"):
+                sanitized[key] = value
+            elif key == "enum" and isinstance(value, list):
+                sanitized["enum"] = [str(v) for v in value]
+            elif key == "items":
+                sanitized["items"] = _sanitize_for_gemini(value)
+            elif key == "properties" and isinstance(value, dict):
+                sanitized["properties"] = {
+                    prop: _sanitize_for_gemini(sub) for prop, sub in value.items()
+                }
+            elif key == "required" and isinstance(value, list):
+                sanitized["required"] = [str(v) for v in value]
+        # Google yêu cầu properties phải đi kèm kiểu OBJECT
+        if "properties" in sanitized and "type" not in sanitized:
+            sanitized["type"] = "OBJECT"
+        if "items" in sanitized and "type" not in sanitized:
+            sanitized["type"] = "ARRAY"
+        return sanitized
+    return node
+
+
+_gemini_schema_cache: Optional[dict] = None
+
+
+def _gemini_response_schema() -> Optional[dict]:
+    """Schema LLMOutput đã sanitize cho Gemini (cache 1 lần). None nếu không dựng được."""
+    global _gemini_schema_cache
+    if _gemini_schema_cache is not None:
+        return _gemini_schema_cache
+    try:
+        raw = LLMOutput.model_json_schema()
+        defs = raw.get("$defs", {})
+        resolved = _resolve_json_refs(raw, defs)
+        sanitized = _sanitize_for_gemini(resolved)
+        if not isinstance(sanitized, dict) or "properties" not in sanitized:
+            logger.warning("Không dựng được response_schema cho Gemini — dùng JSON mime-type only.")
+            return None
+        _gemini_schema_cache = sanitized
+        logger.info("Gemini response_schema đã sanitize (proto-compatible) thành công.")
+        return sanitized
+    except Exception:  # noqa: BLE001
+        logger.exception("Lỗi khi dựng response_schema cho Gemini — FULL TRACEBACK:")
+        return None
+
+
 def _provider_ready(provider: str) -> bool:
+    """Key phải tồn tại và có nội dung thực (không phải chuỗi khoảng trắng)."""
     if provider == "openai":
-        return bool(settings.OPENAI_API_KEY)
+        return bool(settings.OPENAI_API_KEY and settings.OPENAI_API_KEY.strip())
     if provider == "gemini":
-        return bool(settings.GEMINI_API_KEY)
+        return bool(settings.GEMINI_API_KEY and settings.GEMINI_API_KEY.strip())
     return False
 
 
-# =============================================================================
-# FALLBACK GENERATOR (Heuristic — KHÔNG BAO GIỜ fail)
-# =============================================================================
-# ContentCard bắt buộc:
-#   title       : 2-10 từ, 3-120 ký tự (MỘT THÔNG ĐIỆP CỤ THỂ, không nhãn chung chung)
-#   description : 20-60 từ, 120-520 ký tự (2-4 câu diễn giải có dữ kiện thực tế)
-# Bản cũ ghép nguyên prompt vào title (vd. "Bối cảnh tạo bài thuyết trình về
-# solar system") → Pydantic ValueError → HTTP 502. Helper bên dưới luôn kẹp
-# đúng số từ/ký tự trước khi tạo card.
-
-_TITLE_WORD_MIN, _TITLE_WORD_MAX = 2, 10
-_DESC_WORD_MIN, _DESC_WORD_MAX = 20, 60
-_TITLE_CHAR_MAX = 120
-_DESC_CHAR_MIN, _DESC_CHAR_MAX = 120, 520
-
-# Cụm mở đầu kiểu "tạo bài thuyết trình về X" — bỏ đi để lấy đúng chủ đề X.
-_PROMPT_NOISE = re.compile(
-    r"^(?:(?:hãy|hay|vui lòng|please)\s+)?"
-    r"(?:(?:tạo|tao|viết|viet|làm|lam|sinh|generate|create|make|write|build)\s+)?"
-    r"(?:(?:một|mot|an?|the)\s+)?"
-    r"(?:(?:bài|bai)\s+)?"
-    r"(?:thuyết\s*trình|thuyet\s*trinh|presentation|pptx|slides?|deck)\s+"
-    r"(?:(?:về|ve|about|on|for|of|với\s+chủ\s+đề|chu\s+de)\s+)?",
-    re.IGNORECASE,
-)
-
-_SAFE_TITLE = "Chủ đề then chốt"
-# 38 từ / ~220 ký tự — nằm giữa 20-60 từ và 120-520 ký tự.
-_SAFE_DESCRIPTION = (
-    "Phần này phân tích bối cảnh cơ chế vận hành và dữ kiện cụ thể của chủ đề "
-    "để người xem nắm vấn đề cốt lõi. Nội dung nêu phạm vi áp dụng mối liên hệ "
-    "nhân quả cùng ý nghĩa thực tiễn khi triển khai ngay bây giờ."
-)
-_DESC_FILLER = (
-    "Phần phân tích nêu rõ cơ chế dữ kiện và mối liên hệ nhân quả để người xem "
-    "nắm bản chất vấn đề phạm vi áp dụng cùng ý nghĩa thực tiễn khi triển khai "
-    "trong bối cảnh hiện tại của chủ đề này."
-)
+# Model Gemini được Google AI Studio hỗ trợ rộng rãi (tham khảo khi cấu hình).
+# Không khóa cứng vì Google liên tục ra model mới — chỉ cảnh báo khi sai pattern.
+_KNOWN_GEMINI_PREFIXES = ("gemini-", "tunedModels/", "models/gemini-")
 
 
-def _split_words(text: str) -> list:
-    return [w for w in (text or "").replace("\n", " ").split() if w]
-
-
-def _extract_topic_core(prompt: str) -> str:
-    """Lấy chủ đề thật từ prompt, bỏ cụm 'tạo bài thuyết trình về ...'."""
-    first_line = re.sub(r"\s+", " ", (prompt or "").split("\n")[0]).strip()
-    cleaned = _PROMPT_NOISE.sub("", first_line).strip(" .,:;!-–—")
-    core = cleaned or first_line or "chủ đề chính"
-    if len(core) > 120:
-        core = core[:117].rstrip() + "..."
-    return core
-
-
-_TOPIC_STOPWORDS = {"gọi", "về", "cho", "của", "với", "of", "for", "about", "on", "the", "a", "an"}
-
-
-def _topic_phrase(prompt: str, max_words: int = 4) -> str:
-    """Cụm 1-4 từ dùng trong title card.
-
-    Dừng sớm khi gặp token bắt đầu bằng chữ số (con số/%) để giữ cụm danh từ
-    tự nhiên (vd "Báo cáo doanh thu" thay vì "Báo cáo doanh thu quý 3"), rồi
-    bỏ các từ nối đuôi (gọi/về/cho...).
-    """
-    words = _split_words(_extract_topic_core(prompt))
-    out: list = []
-    for word in words[:max_words]:
-        if word[0].isdigit():
-            break
-        out.append(word)
-    while out and out[-1].lower() in _TOPIC_STOPWORDS:
-        out.pop()
-    return " ".join(out) if out else "chủ đề chính"
-
-
-def _fit_title(text: str) -> str:
-    """Kẹp title đúng 2-10 từ và ≤ 120 ký tự."""
-    pads = ["then", "chốt", "cốt", "lõi"]
-    words = _split_words(text)
-    i = 0
-    while len(words) < _TITLE_WORD_MIN:
-        words.append(pads[i % len(pads)])
-        i += 1
-    words = words[:_TITLE_WORD_MAX]
-    result = " ".join(words)
-    while len(result) > _TITLE_CHAR_MAX and len(words) > _TITLE_WORD_MIN:
-        words.pop()
-        result = " ".join(words)
-    if not (_TITLE_WORD_MIN <= len(_split_words(result)) <= _TITLE_WORD_MAX) or not (
-        3 <= len(result) <= _TITLE_CHAR_MAX
-    ):
-        return _SAFE_TITLE
-    return result
-
-
-def _fit_description(text: str) -> str:
-    """Kẹp description đúng 20-60 từ và 120-520 ký tự."""
-    filler = _split_words(_DESC_FILLER)
-    words = _split_words(text)
-    i = 0
-    while True:
-        candidate = " ".join(words)
-        need_words = len(words) < _DESC_WORD_MIN
-        need_chars = len(candidate) < _DESC_CHAR_MIN
-        if not need_words and not need_chars:
-            break
-        if len(words) >= _DESC_WORD_MAX:
-            break
-        words.append(filler[i % len(filler)])
-        i += 1
-    words = words[:_DESC_WORD_MAX]
-    result = " ".join(words)
-    while len(result) > _DESC_CHAR_MAX and len(words) > _DESC_WORD_MIN:
-        words.pop()
-        result = " ".join(words)
-    word_n = len(_split_words(result))
-    if not (
-        _DESC_WORD_MIN <= word_n <= _DESC_WORD_MAX
-        and _DESC_CHAR_MIN <= len(result) <= _DESC_CHAR_MAX
-    ):
-        return _SAFE_DESCRIPTION
-    return result
-
-
-# ==============================================================================
-# TRÍCH XUẤT DỮ KIỆN TỪ PROMPT (cho Fallback Heuristic)
-# ==============================================================================
-# Fallback không có LLM nên không thể "biết" số liệu ngành. Nhưng nếu chính
-# prompt của người dùng CHỨA dữ kiện (vd "$50B", "12.5 triệu USD", "35%",
-# "2025", "99.999%"), ta tái sử dụng chúng để tiêu đề/đoạn mô tả trở nên CỤ THỂ
-# thay vì chung chung — đúng tinh thần "mọi tiêu đề là một thông điệp".
-
-_MONEY_RE = re.compile(
-    r"\$\s?\d[\d.,]*\s?(?:B|M|K|billion|million|trillion|tỷ|triệu)?"
-    r"|\d[\d.,]*\s?(?:triệu|tỷ|nghìn|ngàn)\s?(?:USD|VND|đô|đồng)?",
-    re.IGNORECASE,
-)
-_PERCENT_RE = re.compile(r"\d+(?:[.,]\d+)?\s?%")
-_YEAR_RE = re.compile(r"(?:19|20)\d{2}")
-
-
-def _extract_prompt_facts(prompt: str) -> "dict[str, str]":
-    """Trích dữ kiện định lượng đầu tiên tìm thấy trong prompt.
-
-    Trả dict gồm 'money', 'percent', 'year' (chuỗi rỗng nếu không có).
-    """
-    text = prompt or ""
-    facts = {"money": "", "percent": "", "year": ""}
-    m = _MONEY_RE.search(text)
-    if m:
-        facts["money"] = m.group(0).strip()
-    m = _PERCENT_RE.search(text)
-    if m:
-        facts["percent"] = m.group(0).strip()
-    m = _YEAR_RE.search(text)
-    if m:
-        facts["year"] = m.group(0)
-    return facts
-
-
-def _make_card(
-    *,
-    morph_id: str,
-    title: str,
-    description: str,
-    color_theme: str,
-    order: int,
-):
-    """Tạo ContentCard luôn vượt qua Pydantic (title 2-10 từ, desc 20-60 từ)."""
-    from app.schemas.slide_schema import ContentCard
-
-    safe_id = re.sub(r"[^a-zA-Z0-9_]+", "_", (morph_id or "card")).strip("_") or "card"
-    theme = color_theme if re.fullmatch(r"#?[0-9A-Fa-f]{6}", color_theme or "") else "#8B5CF6"
-    try:
-        return ContentCard(
-            morph_id=safe_id[:80],
-            title=_fit_title(title),
-            description=_fit_description(description),
-            color_theme=theme,
-            order=max(0, min(int(order), 20)),
+def _check_gemini_model_name() -> None:
+    model = (settings.GEMINI_MODEL or "").strip()
+    if not model:
+        logger.warning(
+            "GEMINI_MODEL đang RỖNG — hãy đặt vd 'gemini-1.5-flash' hoặc 'gemini-1.5-pro' "
+            "(xem danh sách model tại Google AI Studio)."
         )
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("ContentCard fallback an toàn vì: %s", exc)
-        return ContentCard(
-            morph_id=safe_id[:80],
-            title=_SAFE_TITLE,
-            description=_SAFE_DESCRIPTION,
-            color_theme=theme,
-            order=max(0, min(int(order), 20)),
+        return
+    if not model.startswith(_KNOWN_GEMINI_PREFIXES):
+        logger.warning(
+            "GEMINI_MODEL=%r trông KHÔNG giống tên model Gemini hợp lệ — Google sẽ trả "
+            "InvalidArgument/NotFound. Giá trị thường dùng: 'gemini-1.5-flash', "
+            "'gemini-1.5-pro', 'gemini-2.0-flash'.",
+            model,
         )
-
-
-def _clip_slide_title(text: str) -> str:
-    title = re.sub(r"\s+", " ", (text or "").strip()) or "Bài Trình Chiếu ExoticMorph"
-    return title[:200]
-
-
-def generate_fallback_presentation(req: GenerateRequest) -> PresentationResponse:
-    """Sinh LLMOutput dự phòng rồi chạy qua Layout Engine.
-
-    Không được raise — đây là lưới an toàn cuối khi LLM/API key không sẵn sàng.
-    """
-    logger.info("Dùng Heuristic Fallback Generator cho prompt: %s", req.prompt[:80])
-    try:
-        return _build_fallback_presentation(req)
-    except Exception as exc:  # noqa: BLE001
-        logger.exception(
-            "Fallback generator lỗi không mong muốn: %s — dùng template an toàn.", exc
-        )
-        return _emergency_presentation(req)
-
-
-def _build_fallback_presentation(req: GenerateRequest) -> PresentationResponse:
-    """Sinh bài trình chiếu dự phòng theo MẠCH KỂ CHUYỆN chuẩn diễn giả:
-
-        Vấn đề → Nguyên nhân gốc rễ → Giải pháp thực thi → Kết quả kỳ vọng → Hành động.
-
-    Không có LLM nên fallback không thể "biết" số liệu ngành, nhưng:
-      - Tái sử dụng dữ kiện có SẴN trong prompt (số tiền, %, năm) để tiêu đề
-        trở thành thông điệp cụ thể (không bịa thêm số).
-      - Tiêu đề là thông điệp hành động, không dùng nhãn sáo rỗng.
-      - Mỗi thẻ gồm tiêu đề cụ thể + đoạn diễn giải 2-3 câu có quan hệ nhân quả.
-    """
-    from app.schemas.slide_schema import RawSlideContent
-
-    num_slides = max(1, min(req.num_slides, 20))
-    vi = (req.language or "vi").lower().startswith("vi")
-    accents = CARD_ACCENTS.get(req.style, CARD_ACCENTS["Futuristic"])
-
-    topic_core = _extract_topic_core(req.prompt)
-    topic_short = _topic_phrase(req.prompt, 3)
-    topic_title = _clip_slide_title(topic_core)
-    facts = _extract_prompt_facts(req.prompt)
-    money, pct, year = facts["money"], facts["percent"], facts["year"]
-
-    # ---- Cụm mô tả dùng chung (vi / en) ----
-    if money:
-        scale_vi = f"Quy mô {money} cho thấy dư địa còn rất lớn. "
-        scale_en = f"A scale of {money} signals plenty of headroom. "
-    else:
-        scale_vi = "Các tổ chức chậm thích ứng đang tụt lại phía sau. "
-        scale_en = "Organisations that adapt slowly are falling behind. "
-
-    def _card(morph_id: str, title: str, desc: str, accent_idx: int, order: int):
-        return _make_card(
-            morph_id=morph_id,
-            title=title,
-            description=desc,
-            color_theme=accents[accent_idx % len(accents)],
-            order=order,
-        )
-
-    raw_slides: list = []
-
-    if vi:
-        # --------------------------------------------------------------
-        # 1) VẤN ĐỀ — đặt vấn đề bằng một thông điệp cụ thể
-        # --------------------------------------------------------------
-        if money:
-            s1_title = f"Cơ hội {money} từ {topic_short} đang mở ra"
-        elif pct:
-            s1_title = f"Tăng trưởng {pct} đang đặt {topic_short} lên tuyến đầu"
-        else:
-            s1_title = f"Vì sao {topic_short} trở thành ưu tiên chiến lược số một"
-        raw_slides.append(RawSlideContent(
-            slide_number=1,
-            section="",
-            slide_title=_clip_slide_title(s1_title),
-            cards=[
-                _card("card_1", f"Nhu cầu {topic_short} đang tăng tốc",
-                      f"Nhu cầu xoay quanh {topic_core} đang gia tăng ở mọi khâu vận hành. "
-                      f"{scale_vi}Chỉ những đơn vị chuyển động sớm mới giữ được lợi thế dẫn đầu.",
-                      0, 0),
-                _card("card_2", "Điểm nghẽn đang kìm hãm tiến độ",
-                      f"Ba điểm nghẽn phổ biến là thiếu dữ liệu tin cậy, quy trình rời rạc và năng lực "
-                      f"chuyên môn phân tán. Chúng đẩy chi phí lên cao trong khi tốc độ ra quyết định "
-                      f"chậm lại. Gỡ sớm thì mọi kế hoạch mới kịp tiến độ.",
-                      1, 1),
-                _card("card_3", "Cái giá của việc chần chừ",
-                      f"Mỗi quý trì hoãn đồng nghĩa chi phí cơ hội và doanh thu bỏ lỡ ngày càng lớn. "
-                      f"Đối thủ đã bắt đầu thử nghiệm và thu hút khách hàng mục tiêu. Thời điểm hành "
-                      f"động tốt nhất chính là hiện tại.",
-                      2, 2),
-            ],
-        ))
-
-        # --------------------------------------------------------------
-        # 2) NGUYÊN NHÂN GỐC RỄ
-        # --------------------------------------------------------------
-        if num_slides >= 2:
-            raw_slides.append(RawSlideContent(
-                slide_number=2,
-                section="",
-                slide_title=_clip_slide_title(f"Ba nguyên nhân gốc rễ khiến {topic_short} chững lại"),
-                cards=[
-                    _card("card_1", "Nguyên nhân trực tiếp phía sau",
-                          f"Vấn đề lớn nhất của {topic_core} thường bắt nguồn từ dữ liệu phân mảnh, "
-                          f"khiến các quyết định dựa trên cảm tính thay vì bằng chứng. Khi không đo "
-                          f"được hiện trạng, tổ chức khó biết nên ưu tiên gỡ nút thắt nào trước.",
-                          0, 0),
-                    _card("card_2", "Rào cản hệ thống khó gỡ",
-                          f"Năng lực và nguồn lực cho {topic_short} bị chia nhỏ giữa nhiều bộ phận, "
-                          f"thiếu một đầu mối chịu trách nhiệm cuối. Quy trình phê duyệt nhiều tầng "
-                          f"kéo dài chu kỳ triển khai và triệt tiêu động lực của nhóm thực thi.",
-                          1, 1),
-                    _card("card_3", "Ngộ nhận phổ biến cần tránh",
-                          f"Nhiều tổ chức nhầm tưởng chỉ cần thêm ngân sách là đủ, trong khi gốc rễ "
-                          f"lại nằm ở cách vận hành. Đầu tư công nghệ mà không thay đổi quy trình "
-                          f"chỉ khuếch đại sự lãng phí hiện có.",
-                          2, 2),
-                ],
-            ))
-
-        # --------------------------------------------------------------
-        # 3) GIẢI PHÁP THỰC THI
-        # --------------------------------------------------------------
-        if num_slides >= 3:
-            raw_slides.append(RawSlideContent(
-                slide_number=3,
-                section="",
-                slide_title=_clip_slide_title(f"Giải pháp khả thi cho {topic_short} trong 90 ngày"),
-                cards=[
-                    _card("card_1", "Trụ cột một: nền tảng dữ liệu",
-                          f"Hợp nhất dữ liệu về {topic_core} vào một nguồn duy nhất, chuẩn hoá định "
-                          f"nghĩa và chỉ số. Bảng điều hành theo thời gian thực giúp mọi bên nhìn "
-                          f"chung một bức tranh và phát hiện bất thường sớm.",
-                          0, 0),
-                    _card("card_2", "Trụ cột hai: quy trình chuẩn hoá",
-                          f"Thiết kế lại quy trình theo chuẩn tinh gọn, giao rõ đầu mối chịu trách "
-                          f"nhiệm ở từng khâu. Cắt bớt tầng phê duyệt trung gian để rút ngắn thời "
-                          f"gian từ ý tưởng đến triển khai.",
-                          1, 1),
-                    _card("card_3", "Trụ cột ba: đo lường liên tục",
-                          f"Đặt bộ chỉ số dẫn dắt cho {topic_short} và họp định kỳ để đối chiếu tiến "
-                          f"độ. Mọi điều chỉnh dựa trên dữ liệu thực tế, không theo cảm tính, giúp "
-                          f"tổ chức học nhanh và xoay trục kịp thời.",
-                          2, 2),
-                ],
-            ))
-
-        # --------------------------------------------------------------
-        # 4) KẾT QUẢ KỲ VỌNG
-        # --------------------------------------------------------------
-        if num_slides >= 4:
-            target = f"trong {year}" if year else "trong 4 quý tới"
-            raw_slides.append(RawSlideContent(
-                slide_number=4,
-                section="",
-                slide_title=_clip_slide_title(f"Những kết quả đo được {target} sau khi triển khai {topic_short}"),
-                cards=[
-                    _card("card_1", f"Mục tiêu định lượng {target}",
-                          f"Đặt mục tiêu cụ thể cho {topic_core} {('(bám sát mốc ' + pct + ')') if pct else ''} "
-                          f"và theo dõi theo tuần. Mục tiêu phải đo được, gắn trách nhiệm cá nhân và có "
-                          f"ngưỡng cảnh báo khi chệch hướng để kịp thời can thiệp.",
-                          0, 0),
-                    _card("card_2", "Lợi ích lan tỏa sang các mảng",
-                          f"Thành công ở {topic_short} kéo theo hiệu quả dây chuyền: giảm chi phí vận "
-                          f"hành, tăng tốc độ quyết định và củng cố vị thế cạnh tranh. Bài học thu được "
-                          f"có thể nhân bản sang các bộ phận khác.",
-                          1, 1),
-                    _card("card_3", "Rủi ro và cách kiểm soát",
-                          f"Rủi ro lớn nhất là triển khai nửa vời rồi dừng giữa chừng. Cần cơ chế giám "
-                          f"sát độc lập, quỹ dự phòng cho tình huống phát sinh và cam kết của lãnh đạo "
-                          f"để giữ nhịp triển khai đến cùng.",
-                          2, 2),
-                ],
-            ))
-
-        # --------------------------------------------------------------
-        # 5) HÀNH ĐỘNG TIẾP THEO — 4 bước lộ trình (roadmap)
-        # --------------------------------------------------------------
-        if num_slides >= 5:
-            raw_slides.append(RawSlideContent(
-                slide_number=5,
-                section="",
-                slide_title=_clip_slide_title(f"Bốn bước hành động cho {topic_short} trong 30 ngày tới"),
-                cards=[
-                    _card("card_1", "Chốt mục tiêu và người chịu trách nhiệm",
-                          f"Ghi rõ kết quả kỳ vọng của {topic_core} trong 30 ngày và phân công một đầu "
-                          f"mối duy nhất. Mục tiêu phải cụ thể, có mốc thời gian và được cả nhóm cam kết.",
-                          0, 0),
-                    _card("card_2", "Phân bổ ngân sách và nguồn lực",
-                          f"Dành nguồn lực nhân sự và ngân sách tối thiểu cho giai đoạn đầu. Ưu tiên "
-                          f"tuyển đúng người có năng lực chuyên môn để tránh lãng phí chi phí học lại.",
-                          1, 1),
-                    _card("card_3", "Chạy thí điểm trong phạm vi hẹp",
-                          f"Triển khai thí điểm cho {topic_short} trên một phân khúc hoặc quy trình nhỏ "
-                          f"trong 2-4 tuần. Thu thập dữ liệu và phản hồi để kiểm chứng giả định trước "
-                          f"khi mở rộng quy mô.",
-                          2, 2),
-                    _card("card_4", "Đo lường, học và nhân rộng",
-                          f"Đánh giá kết quả thí điểm bằng chỉ số đã đặt ra, giữ lại điều hiệu quả và "
-                          f"cắt bỏ phần thừa. Nhân rộng mô hình thành công ra toàn tổ chức theo lộ trình "
-                          f"đã duyệt.",
-                          3, 3),
-                ],
-            ))
-
-        if num_slides > 5:
-            for s_idx in range(6, num_slides + 1):
-                extra_n = s_idx - 5
-                raw_slides.append(RawSlideContent(
-                    slide_number=s_idx,
-                    section="",
-                    slide_title=_clip_slide_title(f"Góc nhìn mở rộng {extra_n} cho {topic_short}"),
-                    cards=[
-                        _card(f"extra_{s_idx}_1", f"Kịch bản {extra_n}: yếu tố ảnh hưởng",
-                              f"Phân tích kịch bản và yếu tố ảnh hưởng đặc thù của {topic_core} chưa "
-                              f"được đề cập ở các phần trước. Xét cả biến số nội tại lẫn ngoại cảnh để "
-                              f"có góc nhìn toàn diện hơn.",
-                              0, 0),
-                        _card(f"extra_{s_idx}_2", f"Đề xuất {extra_n}: hướng xử lý",
-                              f"Đề xuất cách xử lý cụ thể cho kịch bản trên, kèm ưu nhược điểm và điều "
-                              f"kiện áp dụng. Chuyển từ phân tích sang hành động bằng bước thực hiện rõ "
-                              f"ràng cho {topic_short}.",
-                              1, 1),
-                    ],
-                ))
-    else:
-        # --------------------------------------------------------------
-        # ENGLISH narrative arc
-        # --------------------------------------------------------------
-        if money:
-            s1_title = f"A {money} opportunity in {topic_short} is opening up"
-        elif pct:
-            s1_title = f"{pct} growth puts {topic_short} on the front line"
-        else:
-            s1_title = f"Why {topic_short} is now the number-one strategic priority"
-        raw_slides.append(RawSlideContent(
-            slide_number=1,
-            section="",
-            slide_title=_clip_slide_title(s1_title),
-            cards=[
-                _card("card_1", f"Demand for {topic_short} is accelerating",
-                      f"Demand around {topic_core} is rising across every part of operations. "
-                      f"{scale_en}Only early movers will hold the lead.",
-                      0, 0),
-                _card("card_2", "The bottleneck holding back progress",
-                      f"Three recurring bottlenecks are unreliable data, fragmented processes and "
-                      f"scattered expertise. They raise cost while slowing decision speed. Removing "
-                      f"them early keeps every plan on schedule.",
-                      1, 1),
-                _card("card_3", "The cost of waiting",
-                      f"Every quarter of delay means larger opportunity cost and lost revenue. "
-                      f"Competitors are already testing and winning target customers. The best time "
-                      f"to act is now.",
-                      2, 2),
-            ],
-        ))
-
-        if num_slides >= 2:
-            raw_slides.append(RawSlideContent(
-                slide_number=2,
-                section="",
-                slide_title=_clip_slide_title(f"Three root causes behind the slowdown in {topic_short}"),
-                cards=[
-                    _card("card_1", "The direct root cause",
-                          f"The biggest issue for {topic_core} is fragmented data, which forces "
-                          f"decisions to be made on intuition instead of evidence. Without a clear "
-                          f"baseline it is hard to know which constraint to fix first.",
-                          0, 0),
-                    _card("card_2", "Systemic barriers",
-                          f"Capability and resources for {topic_short} are split across many teams "
-                          f"with no single owner. Multi-layer approvals stretch delivery cycles and "
-                          f"drain the team's momentum.",
-                          1, 1),
-                    _card("card_3", "The myth to avoid",
-                          f"Many organisations assume more budget is enough, when the real issue is "
-                          f"how the work runs. Buying technology without changing process only "
-                          f"amplifies existing waste.",
-                          2, 2),
-                ],
-            ))
-
-        if num_slides >= 3:
-            raw_slides.append(RawSlideContent(
-                slide_number=3,
-                section="",
-                slide_title=_clip_slide_title(f"A 90-day solution for {topic_short}"),
-                cards=[
-                    _card("card_1", "Pillar one: a data foundation",
-                          f"Consolidate data on {topic_core} into a single source with standardised "
-                          f"definitions and metrics. A real-time dashboard lets everyone read the same "
-                          f"picture and spot anomalies early.",
-                          0, 0),
-                    _card("card_2", "Pillar two: standardised process",
-                          f"Redesign the workflow to lean standards and assign a clear owner to each "
-                          f"step. Remove middle layers of approval to shorten the path from idea to "
-                          f"execution.",
-                          1, 1),
-                    _card("card_3", "Pillar three: continuous measurement",
-                          f"Define leading indicators for {topic_short} and review progress on a fixed "
-                          f"cadence. Every adjustment is based on real data, helping the organisation "
-                          f"learn fast and pivot in time.",
-                          2, 2),
-                ],
-            ))
-
-        if num_slides >= 4:
-            target = f"in {year}" if year else "within four quarters"
-            raw_slides.append(RawSlideContent(
-                slide_number=4,
-                section="",
-                slide_title=_clip_slide_title(f"Measurable results {target} after rolling out {topic_short}"),
-                cards=[
-                    _card("card_1", f"Quantified targets {target}",
-                          f"Set concrete goals for {topic_core} {('(tracking ' + pct + ')') if pct else ''} "
-                          f"and review them weekly. Targets must be measurable, tied to a named owner and "
-                          f"carry an alert threshold when they drift.",
-                          0, 0),
-                    _card("card_2", "Ripple benefits",
-                          f"Success in {topic_short} creates knock-on gains: lower operating cost, faster "
-                          f"decisions and a stronger competitive position. The lessons can be replicated "
-                          f"across other teams.",
-                          1, 1),
-                    _card("card_3", "Risks and how to control them",
-                          f"The biggest risk is a half-finished rollout. Keep independent oversight, a "
-                          f"contingency fund and visible leadership commitment to sustain momentum to "
-                          f"the end.",
-                          2, 2),
-                ],
-            ))
-
-        if num_slides >= 5:
-            raw_slides.append(RawSlideContent(
-                slide_number=5,
-                section="",
-                slide_title=_clip_slide_title(f"Four actions for {topic_short} in the next 30 days"),
-                cards=[
-                    _card("card_1", "Lock targets and a single owner",
-                          f"Write down the expected outcome for {topic_core} in 30 days and name one "
-                          f"accountable owner. The goal must be specific, time-boxed and committed by "
-                          f"the whole team.",
-                          0, 0),
-                    _card("card_2", "Allocate budget and people",
-                          f"Ring-fence the minimum people and budget for the first phase. Prioritise "
-                          f"hiring the right expertise to avoid paying twice for relearning.",
-                          1, 1),
-                    _card("card_3", "Run a small pilot",
-                          f"Pilot {topic_short} in one narrow segment or workflow for two to four weeks. "
-                          f"Gather data and feedback to validate assumptions before scaling.",
-                          2, 2),
-                    _card("card_4", "Measure, learn and scale",
-                          f"Review the pilot against the agreed metrics, keep what works and cut what "
-                          f"does not. Replicate the winning model across the organisation on an approved "
-                          f"plan.",
-                          3, 3),
-                ],
-            ))
-
-        if num_slides > 5:
-            for s_idx in range(6, num_slides + 1):
-                extra_n = s_idx - 5
-                raw_slides.append(RawSlideContent(
-                    slide_number=s_idx,
-                    section="",
-                    slide_title=_clip_slide_title(f"Extended angle {extra_n} for {topic_short}"),
-                    cards=[
-                        _card(f"extra_{s_idx}_1", f"Scenario {extra_n}: key factors",
-                              f"Examine scenarios and factors specific to {topic_core} not covered "
-                              f"earlier, weighing both internal variables and external forces for a "
-                              f"fuller view.",
-                              0, 0),
-                        _card(f"extra_{s_idx}_2", f"Proposal {extra_n}: how to respond",
-                              f"Propose a concrete response to that scenario with trade-offs and "
-                              f"conditions. Turn analysis into action with clear next steps for "
-                              f"{topic_short}.",
-                              1, 1),
-                    ],
-                ))
-
-    llm_output = LLMOutput(topic=topic_title, slides=raw_slides[:num_slides])
-    return compute_layout(llm_output, req)
-
-
-def _emergency_presentation(req: GenerateRequest) -> PresentationResponse:
-    """Template cứng, luôn hợp lệ — chỉ dùng khi fallback heuristic cũng vỡ."""
-    from app.schemas.slide_schema import ContentCard, RawSlideContent
-
-    card = ContentCard(
-        morph_id="hero_card",
-        title=_SAFE_TITLE,
-        description=_SAFE_DESCRIPTION,
-        color_theme="#8B5CF6",
-        order=0,
-    )
-    llm_output = LLMOutput(
-        topic=_clip_slide_title(_extract_topic_core(req.prompt)),
-        slides=[
-            RawSlideContent(
-                slide_number=1,
-                section="",
-                slide_title=_clip_slide_title(f"Bài toán {_topic_phrase(req.prompt, 3)} và bước đi đầu tiên"),
-                cards=[card],
-            )
-        ],
-    )
-    return compute_layout(llm_output, req)
 
 
 # =============================================================================
-# ENTRY POINT CHÍNH
+# ENTRY POINT CHÍNH — 100% LLM, KHÔNG CÒN FALLBACK VĂN MẪU
 # =============================================================================
 
 async def generate_presentation_with_llm(req: GenerateRequest) -> PresentationResponse:
-    """Gọi LLM -> LLMOutput -> Layout Engine -> PresentationResponse.
+    """Gọi LLM → LLMOutput → Layout Engine → PresentationResponse.
 
-    ⚠️ AUDIT LOG: Ghi log prompt đầy đủ (dưới dạng tiền tố) để kiểm tra biến
-    req.prompt có bị mất/trôi trên luồng từ Frontend vào LLM hay không.
+    ⚠️ THAY ĐỔI HÀNH VI QUAN TRỌNG (v5):
+      - Thành công: 100% nội dung do LLM (OpenAI/Gemini) sáng tạo.
+      - Thất bại:   raise :class:`LLMGenerationError` /
+                    :class:`LLMConfigurationError` với chẩn đoán rõ ràng.
+                    KHÔNG CÒN silent fallback sang văn mẫu B2B ghép chuỗi.
     """
-    provider = settings.LLM_PROVIDER.lower()
+    provider = (settings.LLM_PROVIDER or "openai").lower()
 
-    # Audit log: in ngay đầu pipeline để verify flow
     logger.info(
-        "[AUDIT] generate_presentation_with_llm called with prompt=%r num_slides=%d style=%s lang=%s",
-        req.prompt[:200], req.num_slides, req.style, req.language,
+        "[AUDIT] generate_presentation_with_llm | prompt=%r | num_slides=%d | style=%s | lang=%s | provider=%s",
+        req.prompt[:200], req.num_slides, req.style, req.language, provider,
     )
 
-    provider_chain: list = []
-    if provider != "mock":
-        if _provider_ready(provider):
-            provider_chain.append(provider)
-        else:
-            logger.warning("LLM_PROVIDER='%s' chưa có API key — bỏ qua.", provider)
-        for alt in ("openai", "gemini"):
-            if alt != provider and _provider_ready(alt):
-                provider_chain.append(alt)
+    # "mock" đã bị loại bỏ ở v5 — mock chính là nguồn sinh văn mẫu rác.
+    if provider == "mock":
+        raise LLMConfigurationError(
+            "LLM_PROVIDER='mock' không còn được hỗ trợ: ExoticMorph chỉ sinh nội "
+            "dung bằng LLM thật để đảm bảo chất lượng. Hãy đặt LLM_PROVIDER='gemini' "
+            "hoặc 'openai' kèm API key hợp lệ trong biến môi trường của Backend."
+        )
 
-    for idx, name in enumerate(provider_chain):
+    provider_chain: list = []
+    if _provider_ready(provider):
+        provider_chain.append(provider)
+    else:
+        logger.warning("LLM_PROVIDER='%s' chưa có API key — bỏ qua.", provider)
+    for alt in ("openai", "gemini"):
+        if alt != provider and _provider_ready(alt):
+            provider_chain.append(alt)
+
+    if not provider_chain:
+        raise LLMConfigurationError(
+            "Backend chưa cấu hình API key cho bất kỳ LLM nào "
+            "(GEMINI_API_KEY / OPENAI_API_KEY đều trống). Người vận hành cần bổ "
+            "sung key hợp lệ vào biến môi trường của Backend rồi thử lại."
+        )
+
+    failures: list = []
+    for name in provider_chain:
         try:
             raw_output: LLMOutput = await _PROVIDER_FUNCS[name](req)
-            presentation = compute_layout(raw_output, req)
-            logger.info(
-                "[AUDIT] LLM returned topic=%r (user prompt=%r) — match=%s",
-                raw_output.topic[:80],
-                req.prompt[:80],
-                bool(set(req.prompt.lower().split()) & set(raw_output.topic.lower().split())),
-            )
-            return presentation
-
         except Exception as exc:  # noqa: BLE001
-            is_last = idx == len(provider_chain) - 1
-            logger.warning(
-                "Provider '%s' thất bại: %s.%s",
-                name, exc,
-                "" if is_last else " Chuyển sang provider dự phòng...",
+            # ⚠️ QUY TẮC BẮT BUỘC: in FULL TRACEBACK ra console để lập trình viên
+            # thấy chính xác lỗi gốc từ SDK (không được "nuốt" lỗi im lặng).
+            logger.exception(
+                "Provider '%s' thất bại với exception %s: %s",
+                name, type(exc).__name__, _summarize_exc(exc, limit=500),
             )
+            reason, hint = _diagnose_exception(exc, name)
+            failures.append((name, reason, hint, _summarize_exc(exc)))
+            continue
 
-    if provider_chain:
-        logger.warning("Tất cả LLM provider đều thất bại — dùng Heuristic Fallback.")
-    return generate_fallback_presentation(req)
+        presentation = compute_layout(raw_output, req)
+        logger.info(
+            "[AUDIT] Provider '%s' trả topic=%r (user prompt=%r)",
+            name, raw_output.topic[:80], req.prompt[:80],
+        )
+        return presentation
+
+    # Tất cả provider đều thất bại → FAIL LOUD, không văn mẫu dự phòng.
+    final_message = _build_failure_message(failures)
+    logger.error(
+        "TẤT CẢ LLM PROVIDER ĐỀU THẤT BẠI — trả HTTP 502 cho client.\n%s",
+        final_message,
+    )
+    raise LLMGenerationError(final_message)
