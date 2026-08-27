@@ -49,7 +49,18 @@ export interface BackendSlide {
   speaker_notes?: string | null;
   morph_description?: string | null;
   bg_color?: string | null;
-  layout_type?: "hero" | "compare" | "features" | "roadmap" | "grid";
+  layout_type?:
+    | "hero"
+    | "compare"
+    | "features"
+    | "roadmap"
+    | "grid"
+    | "CARDS_ROW"
+    | "SPLIT_HERO"
+    | "STAT_GRID"
+    | "TIMELINE_STEPS"
+    | "GRID_2X2"
+    | (string & {});
   elements: BackendSlideElement[];
 }
 

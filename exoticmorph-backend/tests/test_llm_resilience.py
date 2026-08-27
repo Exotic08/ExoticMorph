@@ -29,7 +29,12 @@ from app.config import (  # noqa: E402
     mask_secret,
     settings,
 )
-from app.schemas.slide_schema import GenerateRequest, LLMOutput  # noqa: E402
+from app.schemas.slide_schema import (  # noqa: E402
+    GenerateRequest,
+    LLMOutput,
+    LayoutType,
+    SlideData,
+)
 from app.services import llm_service  # noqa: E402
 from app.services.llm_service import (  # noqa: E402
     LLMConfigurationError,
@@ -523,6 +528,119 @@ class RoutesMappingTests(unittest.TestCase):
                 asyncio.run(routes.generate_pptx_presentation(self._req()))
         self.assertEqual(ctx.exception.status_code, 502)
         self.assertIn(REASON_QUOTA_EXCEEDED, ctx.exception.detail)
+
+
+class DynamicLayoutDiversityTests(unittest.TestCase):
+    """Kiểm thử tính năng Dynamic Layout Diversity (5 kiểu layout + không trùng lặp liên tiếp)."""
+
+    def test_layout_type_enum_values(self) -> None:
+        self.assertEqual(LayoutType.CARDS_ROW.value, "CARDS_ROW")
+        self.assertEqual(LayoutType.SPLIT_HERO.value, "SPLIT_HERO")
+        self.assertEqual(LayoutType.STAT_GRID.value, "STAT_GRID")
+        self.assertEqual(LayoutType.TIMELINE_STEPS.value, "TIMELINE_STEPS")
+        self.assertEqual(LayoutType.GRID_2X2.value, "GRID_2X2")
+
+    def test_slide_data_layout_type_coercion(self) -> None:
+        from app.schemas.slide_schema import ContentCard
+        desc = "Thủy tinh quay quanh Mặt Trời trong 88 ngày với quỹ đạo elip dẹt. Nhiệt độ cực hạn -173 đến 427 độ C."
+        s1 = SlideData(
+            slide_number=1,
+            section="MỤC",
+            slide_title="Tiêu đề",
+            layout_type="split-hero",
+            cards=[ContentCard(morph_id="c1", title="Tiêu đề 1", description=desc, color_theme="#8B5CF6", order=0)],
+        )
+        self.assertEqual(s1.layout_type, LayoutType.SPLIT_HERO)
+
+    def test_split_hero_geometry(self) -> None:
+        from app.services.layout_engine import _calculate_cards_geometry_inches
+        boxes = _calculate_cards_geometry_inches(LayoutType.SPLIT_HERO, 3)
+        self.assertEqual(len(boxes), 3)
+        # Thẻ 0 (Hero) ở bên trái
+        self.assertAlmostEqual(boxes[0][0], 0.8)
+        # Thẻ 1 và 2 ở bên phải, cùng hoành độ x
+        self.assertAlmostEqual(boxes[1][0], boxes[2][0])
+        # Thẻ 1 ở trên thẻ 2
+        self.assertLess(boxes[1][1], boxes[2][1])
+        # Thẻ 0 rộng hơn thẻ 1
+        self.assertGreater(boxes[0][2], boxes[1][2])
+
+    def test_grid_2x2_geometry(self) -> None:
+        from app.services.layout_engine import _calculate_cards_geometry_inches
+        boxes = _calculate_cards_geometry_inches(LayoutType.GRID_2X2, 4)
+        self.assertEqual(len(boxes), 4)
+        # Thẻ 0 và 2 cùng hoành độ x trái
+        self.assertAlmostEqual(boxes[0][0], boxes[2][0])
+        # Thẻ 1 và 3 cùng hoành độ x phải
+        self.assertAlmostEqual(boxes[1][0], boxes[3][0])
+        # Thẻ 0 và 1 cùng tung độ y trên
+        self.assertAlmostEqual(boxes[0][1], boxes[1][1])
+        # Thẻ 2 và 3 cùng tung độ y dưới
+        self.assertAlmostEqual(boxes[2][1], boxes[3][1])
+
+    def test_stat_grid_font_size(self) -> None:
+        from app.services.layout_engine import _card_title_font_size
+        self.assertEqual(_card_title_font_size(3, LayoutType.STAT_GRID), 32)
+        self.assertEqual(_card_title_font_size(4, LayoutType.STAT_GRID), 28)
+
+    def test_consecutive_duplicate_layout_prevention(self) -> None:
+        from app.schemas.slide_schema import ContentCard
+        from app.services.layout_engine import compute_layout
+        desc = "Thủy tinh quay quanh Mặt Trời trong 88 ngày với quỹ đạo elip dẹt. Nhiệt độ cực hạn -173 đến 427 độ C."
+        slides = [
+            SlideData(
+                slide_number=i,
+                section="MỤC",
+                slide_title=f"Tiêu đề {i}",
+                layout_type=LayoutType.CARDS_ROW,
+                cards=[ContentCard(morph_id=f"c_{j}", title=f"Thẻ {j}", description=desc, color_theme="#8B5CF6", order=j) for j in range(3)],
+            )
+            for i in range(1, 6)
+        ]
+        output = LLMOutput(topic="Chủ đề", slides=slides)
+        req = GenerateRequest(prompt="Chủ đề", num_slides=5)
+        pres = compute_layout(output, req)
+        layouts = [s.layout_type for s in pres.slides]
+        for i in range(len(layouts) - 1):
+            self.assertNotEqual(
+                layouts[i], layouts[i + 1],
+                f"Phát hiện slide {i+1} và slide {i+2} có cùng layout_type '{layouts[i]}'",
+            )
+
+    def test_build_pptx_with_all_5_layouts(self) -> None:
+        import zipfile
+        from app.schemas.slide_schema import ContentCard
+        from app.services.generator_service import build_pptx_from_schema
+        from app.services.layout_engine import compute_layout
+        desc = "Thủy tinh quay quanh Mặt Trời trong 88 ngày với quỹ đạo elip dẹt. Nhiệt độ cực hạn -173 đến 427 độ C."
+        types = [
+            LayoutType.SPLIT_HERO,
+            LayoutType.STAT_GRID,
+            LayoutType.TIMELINE_STEPS,
+            LayoutType.GRID_2X2,
+            LayoutType.CARDS_ROW,
+        ]
+        slides = [
+            SlideData(
+                slide_number=i + 1,
+                section=f"MỤC {i + 1}",
+                slide_title=f"Tiêu đề slide {i + 1}",
+                layout_type=types[i],
+                cards=[
+                    ContentCard(morph_id=f"c_{j}", title=f"Luận điểm {j + 1}", description=desc, color_theme="#8B5CF6", order=j)
+                    for j in range(4 if types[i] in (LayoutType.GRID_2X2, LayoutType.TIMELINE_STEPS) else 3)
+                ],
+            )
+            for i in range(5)
+        ]
+        output = LLMOutput(topic="5 Kiểu Bố Cục", slides=slides)
+        req = GenerateRequest(prompt="5 Kiểu Bố Cục", num_slides=5)
+        pres = compute_layout(output, req)
+        pptx_buf = build_pptx_from_schema(pres)
+        self.assertGreater(len(pptx_buf.getvalue()), 1000)
+        with zipfile.ZipFile(pptx_buf, "r") as z:
+            slides_xml = [n for n in z.namelist() if n.startswith("ppt/slides/slide") and n.endswith(".xml")]
+            self.assertEqual(len(slides_xml), 5)
 
 
 if __name__ == "__main__":

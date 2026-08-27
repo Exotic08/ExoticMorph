@@ -4,27 +4,90 @@ Pydantic Schemas for Slide Generation & LLM Structured Outputs
 TÁCH BIỆT TRÁCH NHIỆM (Separation of Concerns):
 
 1. **LLM Content Schema** (cho AI sáng tạo — KHÔNG có tọa độ hình học):
-   - `ContentCard`       : một thẻ nội dung (morph_id, title, body, color_theme, order)
-   - `RawSlideContent`   : một slide thô (slide_number, slide_title, cards)
+   - `LayoutType`        : Enum 5 kiểu bố cục đa dạng (CARDS_ROW, SPLIT_HERO, STAT_GRID, TIMELINE_STEPS, GRID_2X2)
+   - `ContentCard`       : một thẻ nội dung (morph_id, title, description, color_theme, order)
+   - `SlideData`         : một slide thô (slide_number, section, slide_title, layout_type, cards)
+   - `RawSlideContent`   : bí danh tương thích ngược của SlideData
    - `LLMOutput`         : toàn bộ output của LLM (topic, slides)
 
 2. **Laid-Out Slide Schema** (cho Python Geometry Engine tính toán):
    - `SlideElement`      : phần tử đã có tọa độ chính xác (x, y, w, h)
-   - `Slide`             : slide đã được Layout Engine xử lý xong
+   - `Slide`             : slide đã được Layout Engine xử lý xong (kèm layout_type)
    - `PresentationResponse`: toàn bộ bài trình chiếu với đầy đủ hình học, sẵn sàng dựng PPTX
 
 QUY TẮC VÀNG:
    - LLM KHÔNG BAO GIỜ được trả về x, y, width, height. Python tính mọi thứ.
-   - LLM chỉ trả về: chữ (nội dung), ý tưởng (title/body), màu (color_theme),
-     và morph_id (để giữ liên kết Morph giữa các slide).
+   - LLM chỉ trả về: chữ (nội dung), ý tưởng (title/description), màu (color_theme),
+     morph_id (để giữ liên kết Morph giữa các slide) và lựa chọn layout_type phù hợp ngữ cảnh.
 """
 
-from typing import List, Optional, Literal
+from enum import Enum
+from typing import Any, List, Optional, Literal
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
 # LLM Strict Models: từ chối MỌI trường thừa (vd: LLM cố trả về x, y, width, height)
 _LLM_STRICT = ConfigDict(extra="forbid")
+
+
+# ==============================================================================
+# 0. DYNAMIC LAYOUT TYPES ENUM
+# ==============================================================================
+
+class LayoutType(str, Enum):
+    """5 kiểu bố cục đa dạng cho slide trình chiếu (Dynamic Layout Diversity).
+
+    - CARDS_ROW      : 2-3 thẻ nằm ngang (Layout mặc định truyền thống).
+    - SPLIT_HERO     : Cột trái rộng (ý chính/Hero point), cột phải xếp 2 thẻ phụ.
+    - STAT_GRID      : Slide nhấn mạnh số liệu (con số to nổi bật + label ngắn).
+    - TIMELINE_STEPS : Tiến trình 3-4 bước theo chiều ngang.
+    - GRID_2X2       : Lưới 4 thẻ chia đều 2 hàng x 2 cột.
+    """
+
+    CARDS_ROW = "CARDS_ROW"
+    SPLIT_HERO = "SPLIT_HERO"
+    STAT_GRID = "STAT_GRID"
+    TIMELINE_STEPS = "TIMELINE_STEPS"
+    GRID_2X2 = "GRID_2X2"
+
+
+# Bảng ánh xạ linh hoạt hỗ trợ tương thích ngược (chấp nhận cả alias chữ thường/cũ)
+_LAYOUT_ALIAS_MAP = {
+    "CARDS_ROW": LayoutType.CARDS_ROW,
+    "CARDS": LayoutType.CARDS_ROW,
+    "FEATURES": LayoutType.CARDS_ROW,
+    "COMPARE": LayoutType.CARDS_ROW,
+    "SPLIT_HERO": LayoutType.SPLIT_HERO,
+    "HERO": LayoutType.SPLIT_HERO,
+    "SPLIT": LayoutType.SPLIT_HERO,
+    "STAT_GRID": LayoutType.STAT_GRID,
+    "STAT": LayoutType.STAT_GRID,
+    "STATS": LayoutType.STAT_GRID,
+    "METRICS": LayoutType.STAT_GRID,
+    "METRICS_GRID": LayoutType.STAT_GRID,
+    "TIMELINE_STEPS": LayoutType.TIMELINE_STEPS,
+    "TIMELINE": LayoutType.TIMELINE_STEPS,
+    "ROADMAP": LayoutType.TIMELINE_STEPS,
+    "STEPS": LayoutType.TIMELINE_STEPS,
+    "GRID_2X2": LayoutType.GRID_2X2,
+    "GRID": LayoutType.GRID_2X2,
+    "2X2": LayoutType.GRID_2X2,
+}
+
+
+def _coerce_layout_type(value: Any) -> LayoutType:
+    """Chuẩn hóa giá trị layout_type về Enum chuẩn, không phân biệt hoa thường."""
+    if isinstance(value, LayoutType):
+        return value
+    if isinstance(value, str):
+        clean = value.strip().upper().replace("-", "_").replace(" ", "_")
+        if clean in _LAYOUT_ALIAS_MAP:
+            return _LAYOUT_ALIAS_MAP[clean]
+        try:
+            return LayoutType(clean)
+        except ValueError:
+            pass
+    return LayoutType.CARDS_ROW
 
 
 # ==============================================================================
@@ -53,39 +116,46 @@ class ContentCard(BaseModel):
     )
     title: str = Field(
         ...,
-        min_length=3,
+        min_length=1,
         max_length=120,
         description=(
-            "Tiêu đề là MỘT THÔNG ĐIỆP CỤ THỂ (2-10 từ), không phải nhãn chung chung. "
-            "Ví dụ ĐÚNG: 'Doanh thu tăng 35% nhờ mở rộng thị trường'; SAI: 'Tình hình doanh thu'."
+            "Tiêu đề là MỘT THÔNG ĐIỆP CỤ THỂ (1-10 từ) hoặc con số/chỉ số định lượng nổi bật. "
+            "Ví dụ ĐÚNG: 'Doanh thu tăng 35% nhờ mở rộng thị trường', '465 °C', '+35%'; SAI: 'Tình hình doanh thu'."
         ),
     )
     description: str = Field(
-        ..., min_length=120, max_length=520,
+        ...,
+        min_length=10,
+        max_length=520,
         description=(
-            "Đoạn diễn giải chi tiết 2-4 câu (20-60 từ) giải thích rõ bản chất vấn đề, "
-            "bắt buộc có dữ kiện định lượng, mốc thời gian, ví dụ hoặc quan hệ nhân quả."
+            "Đoạn diễn giải hoặc label ngắn (3-60 từ) giải thích rõ bản chất vấn đề, "
+            "chứa dữ kiện định lượng, mốc thời gian, ví dụ hoặc quan hệ nhân quả."
         ),
     )
 
     @field_validator("title")
     @classmethod
     def title_word_count(cls, value: str) -> str:
-        if not 2 <= len(value.split()) <= 10:
-            raise ValueError("title phải gồm 2-10 từ")
+        # Chấp nhận từ 1 từ (cho các con số đo lường như 465°C, +35%, 1.989×10³⁰kg) tới 15 từ
+        words = value.split()
+        if not 1 <= len(words) <= 15:
+            raise ValueError("title phải gồm 1-15 từ")
         return value
 
     @field_validator("description")
     @classmethod
     def description_word_count(cls, value: str) -> str:
-        if not 20 <= len(value.split()) <= 60:
-            raise ValueError("description phải gồm 20-60 từ")
+        # Chấp nhận từ label ngắn (3 từ) tới đoạn văn chi tiết (80 từ)
+        words = value.split()
+        if not 3 <= len(words) <= 80:
+            raise ValueError("description phải gồm 3-80 từ")
         return value
 
     @property
     def body(self) -> str:
         """Tương thích ngược với Layout Engine; dữ liệu chuẩn là description."""
         return self.description
+
     color_theme: str = Field(
         ...,
         min_length=4,
@@ -101,11 +171,11 @@ class ContentCard(BaseModel):
     )
 
 
-class RawSlideContent(BaseModel):
-    """Một slide thô do LLM trả về — chỉ có nội dung và danh sách thẻ.
+class SlideData(BaseModel):
+    """Một slide thô do LLM trả về — chỉ có nội dung, danh sách thẻ và lựa chọn layout_type.
 
     Layout Engine sẽ tự động:
-      - Chia lưới dựa trên số lượng cards
+      - Chia lưới dựa trên layout_type và số lượng cards
       - Tính tọa độ x, y, width, height cho từng thẻ
       - Thêm badge, tiêu đề, màu nền theo style
     """
@@ -133,12 +203,33 @@ class RawSlideContent(BaseModel):
         max_length=200,
         description="Tiêu đề chính của slide — là một thông điệp/kết luận cụ thể, hiển thị ở vùng header phía trên các thẻ",
     )
+    layout_type: LayoutType = Field(
+        default=LayoutType.CARDS_ROW,
+        description=(
+            "Kiểu bố cục của slide: "
+            "CARDS_ROW (2-3 thẻ nằm ngang), "
+            "SPLIT_HERO (cột trái hero rộng + cột phải xếp 2 thẻ phụ), "
+            "STAT_GRID (nhấn mạnh số liệu to nổi bật + label ngắn), "
+            "TIMELINE_STEPS (tiến trình 3-4 bước ngang), "
+            "GRID_2X2 (lưới 4 thẻ chia đều 2 hàng x 2 cột). "
+            "Không được để 2 slide liên tiếp có cùng layout_type."
+        ),
+    )
     cards: List[ContentCard] = Field(
         ...,
         min_length=1,
         max_length=6,
-        description="Danh sách các thẻ nội dung trong slide (1-6 thẻ). Layout Engine sẽ tự chia lưới.",
+        description="Danh sách các thẻ nội dung trong slide (1-6 thẻ). Layout Engine sẽ tự chia lưới theo layout_type.",
     )
+
+    @field_validator("layout_type", mode="before")
+    @classmethod
+    def parse_layout_type(cls, value: Any) -> LayoutType:
+        return _coerce_layout_type(value)
+
+
+# Bí danh tương thích ngược hoàn toàn với tên gọi cũ
+RawSlideContent = SlideData
 
 
 class LLMOutput(BaseModel):
@@ -156,7 +247,7 @@ class LLMOutput(BaseModel):
         max_length=300,
         description="Chủ đề tổng thể của bài trình chiếu",
     )
-    slides: List[RawSlideContent] = Field(
+    slides: List[SlideData] = Field(
         ...,
         min_length=1,
         max_length=30,
@@ -175,7 +266,6 @@ SlideElementType = Literal[
 ]
 AspectRatioType = Literal["16:9", "4:3"]
 StyleType = Literal["Futuristic", "Minimal", "Corporate", "Creative"]
-LayoutType = Literal["hero", "compare", "features", "roadmap", "grid"]
 
 MAX_ELEMENTS_PER_SLIDE = 40
 MAX_SLIDES_PER_PRESENTATION = 30
@@ -218,10 +308,15 @@ class Slide(BaseModel):
     speaker_notes: Optional[str] = Field(default=None, max_length=2000)
     morph_description: Optional[str] = Field(default=None)
     bg_color: Optional[str] = Field(default="#0E1017")
-    layout_type: LayoutType = Field(default="features")
+    layout_type: LayoutType = Field(default=LayoutType.CARDS_ROW)
     elements: List[SlideElement] = Field(
         default_factory=list, max_length=MAX_ELEMENTS_PER_SLIDE
     )
+
+    @field_validator("layout_type", mode="before")
+    @classmethod
+    def parse_layout_type(cls, value: Any) -> LayoutType:
+        return _coerce_layout_type(value)
 
 
 class PresentationResponse(BaseModel):
