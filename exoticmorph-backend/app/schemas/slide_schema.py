@@ -419,6 +419,16 @@ class LLMOutput(BaseModel):
             "CorporateMinimalist, Creative, Academic."
         ),
     )
+    visual_theme: Optional[str] = Field(
+        default=None,
+        max_length=30,
+        description=(
+            "Bộ icon/motif thị giác theo ngữ cảnh chủ đề — LLM chọn khi nhận diện "
+            "được lĩnh vực, một trong: space, finance, medical, energy, tech, "
+            "nature, history, food, education, generic. Bỏ qua (null) nếu không "
+            "chắc chắn — backend sẽ tự suy luận từ prompt."
+        ),
+    )
     slides: List[SlideData] = Field(
         ...,
         min_length=1,
@@ -447,9 +457,18 @@ class LLMOutput(BaseModel):
 
 SlideElementType = Literal[
     "text", "shape", "card", "metric", "heading", "badge",
-    "kicker", "footer", "connector", "accent",
+    "kicker", "footer", "connector", "accent", "decoration",
 ]
 AspectRatioType = Literal["16:9", "4:3"]
+
+#: Biến thể thị giác của card — phá vỡ khuôn "thanh màu mỏng phía trên" đồng loạt.
+#: - ``accent_top`` : thanh màu ngang phía trên đỉnh card (kiểu gốc).
+#: - ``accent_left``: viền trái dày (~4-6px) thay vì thanh trên — nhịp điệu mới
+#:                    cho slide dạng list-rows.
+#: - ``outline``    : card KHÔNG nền (trong suốt) + viền mỏng + icon — tạo phân
+#:                    cấp chính/phụ rõ ràng thay vì mọi card cùng trọng lượng.
+#: - ``cta``        : thanh Call-To Action tô màu đặc toàn thân.
+CARD_VARIANTS: Tuple[str, ...] = ("accent_top", "accent_left", "outline", "cta")
 
 MAX_ELEMENTS_PER_SLIDE = 40
 MAX_SLIDES_PER_PRESENTATION = 30
@@ -480,6 +499,28 @@ class SlideElement(BaseModel):
     accent_color: Optional[str] = Field(default=None)
     step: Optional[int] = Field(default=None, ge=1, le=20)
     align: Optional[str] = Field(default=None, pattern="^(left|center|right)$")
+    variant: Optional[str] = Field(
+        default=None,
+        description=(
+            "Biến thể thị giác của card: 'accent_top' (thanh màu trên đỉnh), "
+            "'accent_left' (viền trái dày), 'outline' (không nền + viền mỏng + icon), "
+            "'cta' (thanh CTA tô đặc). None = dùng kiểu mặc định accent_top."
+        ),
+    )
+    opacity: Optional[float] = Field(
+        default=None, ge=0.02, le=1.0,
+        description=(
+            "Độ trong suốt của shape/decoration (0.02-1.0). Hoạ tiết nền dùng "
+            "0.03-0.06 để tạo chiều sâu mà không rối mắt."
+        ),
+    )
+    icon: Optional[str] = Field(
+        default=None, max_length=16,
+        description=(
+            "Icon/motif (emoji hoặc glyph hình học) đặt cạnh tiêu đề card hoặc ở "
+            "góc card số liệu — thuộc bộ motif theo ngữ cảnh chủ đề."
+        ),
+    )
 
 
 class Slide(BaseModel):
@@ -491,7 +532,15 @@ class Slide(BaseModel):
     subtitle: Optional[str] = Field(default=None)
     speaker_notes: Optional[str] = Field(default=None, max_length=2000)
     morph_description: Optional[str] = Field(default=None)
-    bg_color: Optional[str] = Field(default="#0E1017")
+    bg_color: Optional[str] = Field(
+        default="#0E1017",
+        description=(
+            "Nền slide: mã hex (nền đặc) HOẶC chuỗi gradient CSS "
+            "'linear-gradient(<deg>deg, #HEX p%, ... )' cho slide mở bài/kết bài. "
+            "Frontend dùng chuỗi này trực tiếp làm CSS background; PPTX builder "
+            "parse thành <a:gradFill> tương đương."
+        ),
+    )
     layout_type: LayoutType = Field(default=LayoutType.CARDS_ROW)
     elements: List[SlideElement] = Field(
         default_factory=list, max_length=MAX_ELEMENTS_PER_SLIDE

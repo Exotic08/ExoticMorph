@@ -196,6 +196,14 @@ export const SlidePreview: React.FC<SlidePreviewProps> = ({
   const palette = PREVIEW_PALETTES[data.style] ?? PREVIEW_PALETTES.Futuristic;
   const cardLikeElements = currentElements.filter((e) => ["card", "text", "shape", "metric"].includes(e.type));
   const primaryCardId = cardLikeElements.length >= 2 ? cardLikeElements[0]?.id : undefined;
+  // Nền slide: backend có thể trả hex (nền đặc) HOẶC chuỗi CSS gradient
+  // linear-gradient(...) cho slide mở bài/kết bài — chuỗi đó được dùng y nguyên
+  // làm CSS `background` để preview khớp <a:gradFill> trong file PPTX thật.
+  const slideBgValue = (currentSlide.bgColor || "").trim();
+  const isGradientBg = /^linear-gradient\(/i.test(slideBgValue);
+  const slideCanvasBgStyle: React.CSSProperties = isGradientBg
+    ? { background: slideBgValue }
+    : { backgroundColor: currentSlide.bgColor || "#0A0C12" };
 
   const renderBackendElement = (elem: BackendSlideElement, idx: number) => {
     const x = clampNumber(elem.x, 0, 100);
@@ -229,6 +237,25 @@ export const SlidePreview: React.FC<SlidePreviewProps> = ({
     // chúng khi đổi slide -> gây hiệu ứng "chữ đè chữ, nhoè" trong lúc chuyển
     // slide hoặc khi demo Morph tự chạy (setInterval 3.5s).
     const morphLayoutId = elem.morph_id ? `morph-${elem.morph_id}` : undefined;
+
+    // HOẠ TIẾT NỀN rất mờ (opacity 3-6%): chấm sao / lưới toạ độ / lattice —
+    // cùng bộ motif theo chủ đề với file PPTX, nằm dưới mọi phần tử khác.
+    // Không morph_id → không layoutId, không tham gia hiệu ứng chuyển slide.
+    if (elem.type === "decoration") {
+      return (
+        <div
+          key={`${elem.id}-${idx}`}
+          style={{
+            ...baseStyle,
+            zIndex: 0,
+            backgroundColor: elem.bg_color || "#8B5CF6",
+            opacity: elem.opacity ?? 1,
+            borderRadius: elem.shape_type === "oval" ? "9999px" : 2,
+            pointerEvents: "none",
+          }}
+        />
+      );
+    }
 
     if (elem.type === "accent" || elem.type === "connector") {
       return (
@@ -305,6 +332,9 @@ export const SlidePreview: React.FC<SlidePreviewProps> = ({
       const isPrimary = elem.id === primaryCardId;
       const isStatCard = (elem.font_size ?? 0) >= 40;
       const isCta = elem.align === "center" && !elem.sub_text;
+      // Biến thể thị giác do backend layout_engine chọn theo vai trò card —
+      // đồng bộ 1:1 với PPTX builder (accent_top/accent_left/outline/cta).
+      const variant = elem.variant || (isCta ? "cta" : "accent_top");
       const elemWidthIn = (w / 100) * slideWidthIn;
       const elemHeightIn = (h / 100) * SLIDE_HEIGHT_IN;
       const accentInsetPct = elemWidthIn > 0 ? (0.08 / elemWidthIn) * 100 : 0;
@@ -317,6 +347,14 @@ export const SlidePreview: React.FC<SlidePreviewProps> = ({
         elemHeightIn - statBodyH - CARD_TEXT_PAD_BOTTOM_IN,
         statTitleY + statTitleH + 0.16
       );
+      // Card outline: KHÔNG nền (slide bg xuyên qua) + viền mỏng màu accent —
+      // phân cấp thị giác chính/phụ thay vì mọi card cùng 1 trọng lượng.
+      const isOutline = variant === "outline";
+      const cardBorder = isOutline
+        ? `${Math.max(1, ptToPx(CARD_BORDER_PT * 1.3))}px solid ${hexToRgba(elem.accent_color || "#10B981", 0.5)}`
+        : border;
+      // Viền trái dày (accent_left) thay thanh màu trên đỉnh — 0.062" ~ 4.5px.
+      const leftBarWidthPx = inToPx(0.062);
 
       return (
         <motion.div
@@ -327,14 +365,18 @@ export const SlidePreview: React.FC<SlidePreviewProps> = ({
           transition={{ duration: 0.34, delay: Math.min(idx * 0.015, 0.12) }}
           style={{
             ...baseStyle,
-            backgroundColor: elem.bg_color || "#141827",
-            border,
+            backgroundColor: isOutline ? "transparent" : elem.bg_color || "#141827",
+            border: cardBorder,
             borderRadius,
             overflow: "hidden",
-            boxShadow: isPrimary ? "0 18px 42px rgba(0,0,0,0.20)" : "0 12px 30px rgba(0,0,0,0.15)",
+            boxShadow: isOutline
+              ? "none"
+              : isPrimary
+                ? "0 18px 42px rgba(0,0,0,0.20)"
+                : "0 12px 30px rgba(0,0,0,0.15)",
           }}
         >
-          {!isCta && elem.type !== "shape" && (
+          {variant === "accent_top" && !isCta && elem.type !== "shape" && (
             <span
               style={{
                 position: "absolute",
@@ -348,8 +390,36 @@ export const SlidePreview: React.FC<SlidePreviewProps> = ({
             />
           )}
 
+          {variant === "accent_left" && !isCta && elem.type !== "shape" && (
+            <span
+              style={{
+                position: "absolute",
+                left: inToPx(0.02),
+                top: inToPx(0.1),
+                bottom: inToPx(0.1),
+                width: leftBarWidthPx,
+                backgroundColor: elem.accent_color || "#10B981",
+                borderRadius: 999,
+              }}
+            />
+          )}
+
           {elem.type !== "shape" && isStatCard && (
             <>
+              {elem.icon && (
+                <span
+                  style={{
+                    position: "absolute",
+                    top: inToPx(0.16),
+                    right: inToPx(0.16),
+                    fontSize: ptToPx(16),
+                    lineHeight: 1,
+                    opacity: 0.92,
+                  }}
+                >
+                  {elem.icon}
+                </span>
+              )}
               <div
                 style={{
                   position: "absolute",
@@ -400,6 +470,8 @@ export const SlidePreview: React.FC<SlidePreviewProps> = ({
                 inset: isCta
                   ? `${inToPx(0.08)}px ${inToPx(CARD_TEXT_PAD_IN)}px`
                   : `${inToPx(CARD_TEXT_PAD_TOP_IN)}px ${inToPx(CARD_TEXT_PAD_IN)}px ${inToPx(CARD_TEXT_PAD_BOTTOM_IN)}px`,
+                // accent_left: chừa thêm bên trái cho dải viền dày.
+                paddingLeft: variant === "accent_left" ? leftBarWidthPx + inToPx(0.08) : undefined,
                 display: "flex",
                 flexDirection: "column",
                 justifyContent: isCta ? "center" : "flex-start",
@@ -417,6 +489,11 @@ export const SlidePreview: React.FC<SlidePreviewProps> = ({
                   overflow: "hidden",
                 }}
               >
+                {elem.icon && (
+                  <span style={{ marginRight: "0.32em", color: elem.accent_color || "#10B981" }}>
+                    {elem.icon}
+                  </span>
+                )}
                 {elem.content}
               </div>
               {elem.sub_text && (
@@ -552,7 +629,7 @@ export const SlidePreview: React.FC<SlidePreviewProps> = ({
             className={`w-full max-w-4xl relative rounded-xl overflow-hidden border border-white/[0.10] shadow-2xl transition-all duration-500 ${
               data.aspectRatio === "4:3" ? "slide-ratio-4-3" : "slide-ratio-16-9"
             }`}
-            style={{ backgroundColor: currentSlide.bgColor || "#0A0C12" }}
+            style={slideCanvasBgStyle}
           >
             {currentElements.length > 0 ? (
               currentElements.map((elem, idx) => renderBackendElement(elem, idx))

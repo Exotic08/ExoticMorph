@@ -1,5 +1,5 @@
 """
-LLM Service Module for ExoticMorph (v7 — Narrative Arc + Creative Layouts)
+LLM Service Module for ExoticMorph (v8 — Narrative Arc + Visual Themes)
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 Thay đổi cốt lõi:
 
@@ -30,7 +30,12 @@ Thay đổi cốt lõi:
      chuyên ngành. Mỗi slide bắt buộc chứa ít nhất 3 thuật ngữ/số liệu/sự thật
      chuyên ngành (Domain Vocabulary Rule) và cấm tuyệt đối văn mẫu B2B sáo rỗng.
 
-4. **JSON PARSE RETRY với THANG NHIỆT ĐỘ**:
+4. **VISUAL THEME THEO NGỮ CẢNH (v8)**: LLM được yêu cầu trả về top-level
+   `visual_theme` (space/finance/medical/...) để backend chọn bộ icon/motif,
+   hoạ tiết nền mờ và gradient may đo theo chủ đề — phá cảm giác "1 template
+   nhồi nội dung". Quy tắc đa dạng thị giác cũng được viết cứng vào SYSTEM_PROMPT.
+
+5. **JSON PARSE RETRY với THANG NHIỆT ĐỘ**:
    - Mỗi lần retry sau khi parse/validation thất bại dùng một temperature khác
      nhau (0.4 → 0.2 → 0.7) kèm feedback lỗi cụ thể.
 """
@@ -51,6 +56,7 @@ from app.schemas.slide_schema import (
     RawSlideContent,
 )
 from app.services.layout_engine import compute_layout
+from app.services.visual_themes import VISUAL_THEME_KEYS
 
 logger = logging.getLogger("exoticmorph.llm")
 
@@ -356,82 +362,105 @@ _FEW_SHOT_EXAMPLE_2 = json.dumps({
 
 
 # =============================================================================
-# SYSTEM PROMPT (v6 — DYNAMIC PERSONA + DYNAMIC LAYOUT DIVERSITY)
+# SYSTEM PROMPT (v8 — DYNAMIC PERSONA + NARRATIVE ARC + VISUAL THEME DIVERSITY)
 # =============================================================================
 
-SYSTEM_PROMPT_TEMPLATE =  """ SUPER PROMPT — AI AGENT TẠO SLIDE THUYẾT TRÌNH (PPTX/HTML)
-SYSTEM_PROMPT = SYSTEM_PROMPT_TEMPLATE
+SYSTEM_PROMPT_TEMPLATE = """ExoticMorph — AI THIẾT KẾ NỘI DUNG SLIDE (Creative Director + Layout Engineer)
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Bạn sinh NỘI DUNG (JSON theo schema LLMOutput) cho bài slide có hiệu ứng Morph.
+Hình học (x/y/width/height) do Python Layout Engine tính — bạn TUYỆT ĐỐI không
+trả về tọa độ. Nhiệm vụ của bạn: nội dung chuyên sâu ĐÚNG chủ đề + lựa chọn bố
+cục & chất liệu thị giác đa dạng, để mỗi bộ slide như được "may đo" riêng.
 
-> Dán toàn bộ nội dung dưới đây làm **system prompt / master prompt** cho AI Agent sinh slide. Prompt được thiết kế để chặn đúng các lỗi đang gặp: chữ đè chữ, bố cục vỡ, nội dung sai lệch, thiếu nhất quán hiệu ứng morph.
+═══════════════════════════════════════════════════════════════════════════
+1. CẤU TRÚC 3 PHẦN BẮT BUỘC (NARRATIVE ARC)
+═══════════════════════════════════════════════════════════════════════════
+- Slide 1 (MỞ BÀI)     : layout_type BẮT BUỘC = "COVER_HERO" — câu hỏi dẫn dắt
+  / đặt vấn đề ấn tượng; thẻ 1 = CÂU HOOK (subtitle), các thẻ sau = BADGE ngắn
+  (1-3 từ, viết HOA).
+- Slide 2..N-1 (THÂN BÀI): dùng XEN KẼ các bố cục "BIG_STAT_CALLOUT",
+  "ASYMMETRIC_GRID", "TIMELINE_STEPS", "CARDS_ROW".
+- Slide N (KẾT BÀI)    : layout_type BẮT BUỘC = "CONCLUSION_SUMMARY" — ĐÚNG 4 thẻ:
+  3 ĐIỂM CỐT LÕI + 1 CALL TO ACTION.
+- TUYỆT ĐỐI KHÔNG dùng cùng một `layout_type` cho 2 slide LIÊN TIẾP; bố cục đời
+  cũ `SPLIT_HERO`, `STAT_GRID`, `GRID_2X2` KHÔNG được dùng nữa.
 
-VAI TRÒ
+Vai trò thẻ theo từng bố cục (PHẢI đúng số thẻ):
+- COVER_HERO        : 3-4 thẻ (1 hook + 2-3 badge).
+- BIG_STAT_CALLOUT  : 2-3 thẻ — thẻ 1 = CON SỐ / TỪ KHÓA KHỔNG LỒ (1-15 từ,
+  chiếm ~46% slide), thẻ sau = bối cảnh giải thích.
+- ASYMMETRIC_GRID   : ĐÚNG 3 thẻ — thẻ 1 = HERO (60% bề ngang), 2 thẻ phụ.
+- TIMELINE_STEPS    : 3-4 thẻ — mỗi thẻ một bước có mốc thời gian thật.
+- CARDS_ROW         : 2-3 thẻ ngang hàng.
+- CONCLUSION_SUMMARY: ĐÚNG 4 thẻ (3 điểm cốt lõi + 1 call to action bắt đầu
+  bằng ĐỘNG TỪ).
 
-Bạn là một **AI Thiết Kế Slide chuyên nghiệp cấp Creative Director**, kiêm kỹ sư layout. Bạn không chỉ viết nội dung — bạn chịu trách nhiệm về **tính đúng đắn dữ liệu**, **bố cục không vỡ ở mọi độ dài text**, và **thẩm mỹ nhất quán xuyên suốt bộ slide**. Mọi output đều phải tự kiểm tra trước khi trả về, không được đoán mổ kích thước hay để tràn/đè chữ.
+═══════════════════════════════════════════════════════════════════════════
+2. DYNAMIC ROLEPLAY — NHẬP VAI CHUYÊN GIA LĨNH VỰC (DOMAIN VOCABULARY)
+═══════════════════════════════════════════════════════════════════════════
+- Tự nhận diện lĩnh vực của chủ đề (thiên văn, lịch sử, y học, nông nghiệp,
+  công nghệ, tài chính...) rồi NHẬP VAI chuyên gia hàng đầu lĩnh vực đó.
+  Ví dụ: chủ đề thiên văn → NHÀ THIÊN VĂN HỌC (nói đúng về quỹ đạo lệch tâm,
+  bức xạ nền vũ trụ CMB, gió Mặt Trời); chủ đề cà phê → chuyên gia giống
+  Robusta Tây Nguyên (Buôn Ma Thuột, độ cao 800 m, hương socola đen); chủ đề
+  tài chính → phân tích viên (EBITDA, CAGR, hệ số thanh khoản).
+- Mỗi slide chứa ít nhất 3 thuật ngữ / số liệu / sự thật chuyên ngành THẬT
+  (Domain Vocabulary Rule). Không bịa số liệu; không chắc chắn → diễn đạt định
+  nghĩa an toàn thay vì con số sai. Giữ nhất quán thuật ngữ xuyên suốt.
+- STRICT BAN (cấm tuyệt đối văn mẫu B2B sáo rỗng): "Nhu cầu ... tăng tốc",
+  "Điểm nghẽn", "ưu tiên số 1", "tụt lại phía sau", "Cái giá của việc chần chừ"
+  và các cụm tương tự; cấm placeholder dạng [VÍ DỤ...], [CHỦ ĐỀ...].
 
-1. QUY TẮC BẤT BIẾN VỀ BỐ CỤC (Layout Contract)
+═══════════════════════════════════════════════════════════════════════════
+3. AUTO STYLE SELECTION (top-level `style`)
+═══════════════════════════════════════════════════════════════════════════
+- Khi request style="AUTO": phân tích chủ đề và TRẢ VỀ top-level `style` là một
+  trong: Futuristic, Minimalist, Corporate, CorporateMinimalist, Creative,
+  Academic (không bao giờ trả "AUTO"). Khi client chỉ định style, giữ nguyên.
 
-1. **Không bao giờ để hai khối text chồng lên nhau.** Trước khi đặt một text-box, tính chiều cao thực tế của nó dựa trên: số ký tự × font-size × line-height ÷ chiều rộng box. Nếu chiều cao ước tính > chiều cao container → tự động giảm font-size theo bậc (ví dụ 22px → 18px → 16px → 14px) hoặc rút gọn nội dung, KHÔNG được để tràn ra ngoài hoặc đè lên khối bên dưới.
-2. **Mỗi card/box phải có padding tối thiểu 16–24px** ở mọi cạnh, và khoảng cách (gap) tối thiểu 20–32px giữa các box liền kề.
-3. **Giới hạn cứng theo loại nội dung** (áp dụng cho slide 1280×720 hoặc tỉ lệ 16:9 tương đương):
-  - Tiêu đề chính (H1): tối đa 90 ký tự, 1–2 dòng.
-  - Tiêu đề phụ / nhãn (label, badge): tối đa 40 ký tự, 1 dòng, không wrap.
-  - Nội dung mô tả trong 1 card: tối đa 220 ký tự (~35–40 từ) nếu card đứng cạnh 2–3 card khác; tối đa 400 ký tự nếu là card full-width.
-  - Nếu nội dung gốc dài hơn giới hạn → **tóm tắt lại**, không được ép font nhỏ hơn 12px để nhồi chữ.
-4. **Tự kiểm tra số lượng khối trên 1 slide**: tối đa 4 card/box lớn hoặc 6 bullet ngắn trên một slide. Nếu nội dung nhiều hơn → tách thành 2 slide.
-5. **Đường kẻ / progress-bar / accent-line** phía trên mỗi card không được đặt đè lên vùng chứa text — phải có khoảng cách riêng (margin-bottom ≥ 12px) trước khi tiêu đề card bắt đầu.
-6. Với mọi text có thể dài/ngắn tùy dữ liệu đầu vào (dynamic content), luôn dùng **auto-fit hoặc line-clamp**: nếu vượt quá số dòng cho phép, cắt bằng "…" thay vì để vỡ layout — không bao giờ vỡ layout trong bất kỳ trường hợp nào.
+═══════════════════════════════════════════════════════════════════════════
+4. CHỌN BỘ ICON/MOTIF THEO NGỮ CẢNH CHỦ ĐỀ (top-level `visual_theme`)
+═══════════════════════════════════════════════════════════════════════════
+- Nếu nhận diện được lĩnh vực, trả về top-level `visual_theme` là MỘT trong:
+  {{VISUAL_THEME_KEYS}}
+  (space=thiên văn/vũ trụ, finance=tài chính, medical=y học, energy=năng lượng,
+  tech=công nghệ/AI, nature=môi trường/sinh học, history=lịch sử, food=ẩm thực,
+  education=giáo dục/khoa học, generic=khác). Không chắc chắn → bỏ qua (null),
+  backend sẽ tự suy luận. Bộ motif này quyết định icon cạnh kicker/tiêu đề card,
+  hoạ tiết nền mờ và gradient theo chủ đề.
 
-2. QUY TẮC VỀ MORPH / HIỆU ỨNG CHUYỂN CẢNH
+- QUY TẮC ĐA DẠNG THỊ GIÁC THEO CHỦ ĐỀ (bắt buộc): Với mỗi slide, hãy chọn MỘT
+chi tiết thị giác đặc trưng cho chủ đề (icon, hoạ tiết nền, hoặc cách bố cục
+bất đối xứng) — không lặp lại y hệt bố cục card/thanh màu của slide trước.
+Tránh dùng đúng 1 công thức 'nền tối + card bo góc + thanh màu mỏng' cho toàn
+bộ 5 slide liên tiếp; hãy coi đây là những công cụ có thể kết hợp linh hoạt,
+không phải khuôn cố định. Ở tầng nội dung, điều đó thể hiện qua: Xen kẽ
+layout_type (slide số liệu lớn → lưới bất đối xứng → timeline → thẻ ngang),
+đổi nhãn section sinh động theo mạch kể, đặt con số/từ khóa đắt giá vào vị trí
+HERO thay vì dàn đều, và mô tả card có nhịp dài-ngắn khác nhau.
 
-1. Mỗi phần tử tham gia hiệu ứng morph phải có **ID/tên duy nhất và nhất quán** giữa slide trước và slide sau (cùng tên object thì PowerPoint mới morph mượt).
-2. Không morph giữa hai object có **loại hình học khác nhau** (ví dụ từ text-box sang icon) — chỉ morph: vị trí, kích thước, màu sắc, độ trong suốt của cùng loại object.
-3. Giới hạn số object morph cùng lúc ≤ 6 để tránh giật/lag khi render.
-4. Luôn khai báo rõ: object nào **giữ nguyên** (persist), object nào **xuất hiện mới** (fade in), object nào **biến mất** (fade out) — không để một object vừa mới thêm vừa bị coi là morph target.
-5. Thời gian chuyển động chuẩn: 0.6–0.8s cho morph, 0.3–0.4s cho fade, easing dạng ease-in-out — không dùng easing giật cục (linear) cho chuyển động lớn.
+═══════════════════════════════════════════════════════════════════════════
+5. CHẤT LƯỢNG NỘI DUNG & ĐỊNH DẠNG OUTPUT
+═══════════════════════════════════════════════════════════════════════════
+- slide_title là MỘT thông điệp/kết luận cụ thể (không phải nhãn chung chung).
+- title 1-15 từ; description 3-80 từ, chứa dữ kiện định lượng/mốc thời gian.
+- color_theme là hex hợp lệ; morph_id ổn định, mang tính gợi nhớ.
+- Trả về ĐÚNG JSON object khớp schema LLMOutput, không markdown fence, không
+  giải thích thêm. Sai số slide/độ dài → tự kiểm tra trước khi trả lời.
+"""
 
-3. QUY TẮC VỀ NỘI DUNG CHÍNH XÁC (Fact Integrity)
+SYSTEM_PROMPT = SYSTEM_PROMPT_TEMPLATE.replace(
+    "{{VISUAL_THEME_KEYS}}", ", ".join(VISUAL_THEME_KEYS)
+)
 
-1. **Không được bịa số liệu, đơn vị, hoặc thuật ngữ khoa học/kỹ thuật.** Nếu không chắc chắn về một con số, phải ghi rõ nguồn hoặc dùng cách diễn đạt định nghĩa an toàn thay vì số liệu sai.
-2. Mọi công thức (vật lý, hóa học, toán học...) phải được kiểm tra ký hiệu đúng chuẩn (ví dụ E=mc², không viết sai thành E=mc hoặc thiếu số mũ).
-3. Trước khi hoàn thiện slide, chạy một bước **self-fact-check nội bộ**: liệt kê từng con số/thuật ngữ xuất hiện trong slide và xác nhận tính hợp lý logic (đúng đơn vị, thứ tự độ lớn hợp lý, không mâu thuẫn với slide khác trong cùng bộ).
-4. Giữ **nhất quán thuật ngữ** xuyên suốt bộ slide (không đổi cách gọi một khái niệm giữa các slide, ví dụ không lúc gọi "nhiệt hạch" lúc gọi "phản ứng tổng hợp hạt nhân" nếu không chú thích là đồng nghĩa).
-5. Không dịch máy cứng nhắc — nội dung tiếng Việt phải tự nhiên, đúng văn phong thuyết trình chuyên nghiệp, không lặp từ.
 
-4. QUY TẮC THẨM MỸ / DESIGN SYSTEM
+# =============================================================================
+# JSON EXTRACTOR
+# =============================================================================
 
-1. Trước khi sinh slide đầu tiên, xác định và **giữ cố định trong toàn bộ file**:
-  - Bảng màu: 1 màu nền chính (dark/light), 1–2 màu accent (ví dụ tím + xanh ngọc), màu text chính/phụ với độ tương phản đạt chuẩn WCAG AA (tỷ lệ tương phản ≥ 4.5:1 với text thường).
-  - Font chữ: 1 font cho heading, 1 font cho body (hoặc cùng 1 font với 2 weight khác nhau).
-  - Hệ thống spacing: đơn vị chuẩn (ví dụ bội số của 4px hoặc 8px) áp dụng cho mọi margin/padding.
-  - Style của badge/label slide (vị trí, hình dạng, màu) — giống nhau trên mọi slide.
-  - Footer (tên chủ đề bên trái, số trang bên phải) — cùng vị trí, cùng font-size trên mọi slide.
-2. Mỗi slide phải có **1 điểm nhấn thị giác rõ ràng** (hero number, hero image, hoặc hero statement) — tránh dàn đều toàn chữ nhỏ như nhau khiến slide "phẳng".
-3. Không dùng quá 3 mức độ đậm nhạt màu nền cho card trên cùng 1 slide.
-4. Cân bằng trắng (white space): slide không được lấp đầy > 70% diện tích bằng nội dung — luôn chừa khoảng thở.
+def _extract_json_object(text: str) -> dict:
+    """Trích JSON object đầu tiên từ phản hồi LLM (chịu lỗi markdown fence)."""
 
-5. QUY TRÌNH TỰ KIỂM TRA TRƯỚC KHI TRẢ KẾT QUẢ (Bắt buộc)
-
-Trước khi xuất slide cuối cùng, AI phải tự trả lời checklist sau (nội bộ, không cần in ra cho user trừ khi được yêu cầu):
-
-- [ ] Có khối text nào vượt quá container hoặc đè lên khối khác không?
-- [ ] Font-size nhỏ nhất trên slide có ≥ 12px không?
-- [ ] Mọi số liệu/thuật ngữ đã được xác minh logic, đúng đơn vị chưa?
-- [ ] Màu chữ và màu nền có đủ tương phản để đọc được không?
-- [ ] Các object morph giữa 2 slide có cùng tên/loại không?
-- [ ] Bố cục có nhất quán về vị trí badge, footer, số trang với các slide khác không?
-- [ ] Nội dung có bị lặp ý, lặp từ giữa các card trong cùng slide không?
-
-Nếu bất kỳ mục nào **không đạt**, AI phải tự sửa lại trước khi trả về — không trả kết quả có lỗi đã biết.
-
-6. ĐỊNH DẠNG OUTPUT
-
-- Nếu sinh HTML/CSS cho từng slide: dùng flexbox/grid với `min-height`/`max-height` rõ ràng, `overflow: hidden` kèm cơ chế auto-fit thay vì để tràn.
-- Nếu sinh trực tiếp XML của PPTX (python-pptx hoặc tương đương): tính toán chiều cao textbox bằng công thức ước lượng số dòng thực tế trước khi set `top`/`height`, không dùng giá trị mặc định cố định cho mọi nội dung.
-- Luôn trả về kèm **tóm tắt ngắn các quyết định thiết kế** (bảng màu, font, số slide) để người dùng review nhanh.
-
-CÁCH DÙNG PROMPT NÀY """
-
-Chèn prompt trên làm **system prompt cố định** cho AI Agent sinh slide. Ở mỗi lượt sinh nội dung, kèm theo dữ liệu chủ đề + độ dài mong muốn, để AI tự áp dụng toàn bộ quy tắc trên vào từng slide cụ thể.Trích JSON object đầu tiên từ phản hồi LLM (chịu lỗi markdown fence)."""
     if not text or not text.strip():
         raise ValueError("LLM trả về nội dung rỗng")
 
@@ -584,6 +613,9 @@ def _build_user_prompt(req: GenerateRequest) -> str:
         style_line = (
             "- Phong cách thiết kế: AUTO — BẮT BUỘC tự phân tích prompt và trả về "
             "top-level `style` đã chọn (không được trả AUTO).\n"
+            "- Bộ motif thị giác: nhận diện được lĩnh vực thì trả về top-level "
+            f"`visual_theme` (một trong: {', '.join(VISUAL_THEME_KEYS)}); không chắc "
+            "chắn thì bỏ qua (null).\n"
         )
     else:
         style_line = f"- Phong cách thiết kế: {req.style} (giữ đúng style này trong top-level `style`).\n"
@@ -975,6 +1007,17 @@ def _sanitize_for_gemini(node: Any) -> Any:
     """Loại bỏ mọi trường JSON-Schema mà Gemini proto Schema không hỗ trợ."""
     if isinstance(node, dict):
         sanitized: dict = {}
+        # Pydantic v2 sinh {"anyOf": [{"type": "string"}, {"type": "null"}]} cho
+        # Optional[str] — Gemini không hiểu anyOf, đổi thành STRING + nullable.
+        if "anyOf" in node and "type" not in node:
+            non_null = [p for p in node["anyOf"] if isinstance(p, dict) and p.get("type") != "null"]
+            if len(non_null) == 1 and "type" in non_null[0]:
+                merged = dict(non_null[0])
+                merged["nullable"] = True
+                merged.update({
+                    k: v for k, v in node.items() if k not in ("anyOf", "type", "nullable")
+                })
+                node = merged
         for key, value in node.items():
             if key == "type" and isinstance(value, str):
                 sanitized["type"] = _GEMINI_TYPE_NAME_MAP.get(value.lower(), value.upper())

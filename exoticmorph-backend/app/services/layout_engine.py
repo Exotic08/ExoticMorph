@@ -45,6 +45,15 @@ from app.schemas.slide_schema import (
     LayoutType,
     _coerce_style_type,
 )
+from app.services.visual_themes import (
+    VisualTheme,
+    card_icon_for,
+    closing_gradient_css,
+    cover_gradient_css,
+    kicker_icon_for,
+    pattern_decorations,
+    resolve_visual_theme,
+)
 
 logger = logging.getLogger("exoticmorph.layout")
 
@@ -869,12 +878,22 @@ def _build_badge_element(slide_idx: int, palette: dict) -> SlideElement:
     )
 
 
-def _build_kicker_element(slide_idx: int, section: str, palette: dict) -> SlideElement:
-    """Nhãn mục (kicker) in hoa ngay trên tiêu đề — thể hiện vị trí trong mạch kể chuyện."""
+def _build_kicker_element(
+    slide_idx: int,
+    section: str,
+    palette: dict,
+    theme: Optional[VisualTheme] = None,
+) -> SlideElement:
+    """Nhãn mục (kicker) in hoa ngay trên tiêu đề — thể hiện vị trí trong mạch kể chuyện.
+
+    Khi có visual theme, kicker được mở đầu bằng 1 icon/motif thuộc ngữ cảnh chủ
+    đề (🪐 📈 ⚕ ...) xoay vòng theo slide — điểm nhấn thị giác thay vì text thuần.
+    """
+    icon = f"{kicker_icon_for(theme, slide_idx)}  " if theme else ""
     return SlideElement(
         id=f"kicker_slide_{slide_idx}",
         type="kicker",
-        content=(section or "").upper(),
+        content=f"{icon}{(section or '').upper()}",
         x=_pct_w(MX_IN),
         y=_pct_h(KICKER_TOP_IN),
         width=_pct_w(SLIDE_W_IN - 2 * MX_IN),
@@ -952,11 +971,13 @@ def _build_cover_elements(
     badge_cards: List[ContentCard],
     palette: dict,
     accents: List[str],
+    theme: Optional[VisualTheme] = None,
 ) -> List[SlideElement]:
     """Dựng toàn bộ phần tử slide MỞ BÀI (COVER_HERO).
 
-    Gồm: badge slide, kicker (eyebrow), tiêu đề siêu lớn, thanh accent,
-    subtitle nổi bật (hoặc dòng diễn giải phụ) và hàng badge ôm sát chữ.
+    Gồm: badge slide, kicker (eyebrow) kèm icon motif chủ đề, tiêu đề siêu lớn,
+    thanh accent, subtitle nổi bật (hoặc dòng diễn giải phụ) và hàng badge ôm
+    sát chữ.
     """
     elements: List[SlideElement] = []
 
@@ -976,11 +997,12 @@ def _build_cover_elements(
         shape_type="rounded_rectangle",
     ))
 
-    # Kicker (eyebrow) đặt sát ngay trên tiêu đề siêu lớn.
+    # Kicker (eyebrow) đặt sát ngay trên tiêu đề siêu lớn — mở đầu bằng icon motif.
+    cover_icon = f"{kicker_icon_for(theme, slide_idx)}  " if theme else ""
     elements.append(SlideElement(
         id=f"kicker_slide_{slide_idx}",
         type="kicker",
-        content=(section or "").upper(),
+        content=f"{cover_icon}{(section or '').upper()}",
         x=_pct_w(COVER_MX_IN),
         y=_pct_h(COVER_TITLE_TOP_IN - 0.52),
         width=_pct_w(SLIDE_W_IN - 2 * COVER_MX_IN),
@@ -1062,7 +1084,9 @@ def _build_conclusion_elements(
     """
     elements: List[SlideElement] = []
 
-    # 1) Các dòng điểm cốt lõi — card mỏng, bo góc, viền 0.75pt ở PPTX.
+    # 1) Các dòng điểm cốt lõi — card mỏng dạng list-rows với VIỀN TRÁI DÀY
+    #    (biến thể accent_left) thay vì thanh màu trên đỉnh, tạo nhịp dọc riêng
+    #    cho slide kết bài.
     row_coords = _conclusion_rows_geometry(num_rows)
     for i, (card, box) in enumerate(zip(row_cards, row_coords)):
         x, y, w, h = box
@@ -1084,6 +1108,7 @@ def _build_conclusion_elements(
             shape_type="rounded_rectangle",
             border_color=palette["card_border"],
             step=i + 1,
+            variant="accent_left",
         ))
 
     # 2) Thanh Call To Action.
@@ -1109,9 +1134,38 @@ def _build_conclusion_elements(
             font_size=SUM_CTA_PT,
             shape_type="rounded_rectangle",
             align="center",
+            variant="cta",
         ))
 
     return elements
+
+
+def _card_variant_for(layout: LayoutType, card_index: int, num_cards: int) -> Tuple[str, bool]:
+    """Chọn biến thể thị giác + có icon cho card theo vai trò trong bố cục.
+
+    Phá khuôn "mọi card đều thanh màu mỏng phía trên":
+      - thẻ Hero/chính giữ ``accent_top`` (thanh màu đỉnh — điểm neo thị giác),
+      - thẻ phụ dạng dòng/cột dùng ``accent_left`` (viền trái dày),
+      - thẻ phụ "nhẹ" (timeline, cột bên asymmetric) dùng ``outline`` (không nền,
+        viền mỏng + icon) → phân cấp chính/phụ rõ ràng thay vì đồng trọng lượng.
+    Trả về (variant, use_icon).
+    """
+    if layout == LayoutType.BIG_STAT_CALLOUT:
+        if card_index == 0:
+            return "accent_top", True   # số khổng lồ: icon xu hướng ở góc
+        return "accent_left", True
+    if layout in (LayoutType.ASYMMETRIC_GRID, LayoutType.SPLIT_HERO):
+        if card_index == 0:
+            return "accent_top", False
+        return "outline", True
+    if layout == LayoutType.TIMELINE_STEPS:
+        return "outline", True          # bước quy trình: card rỗng + icon, số thứ tự ở vòng tròn phía trên
+    if layout == LayoutType.CONCLUSION_SUMMARY:
+        return "accent_left", False     # list-rows: viền trái dày tạo nhịp dọc
+    # CARDS_ROW và các layout khác
+    if card_index == 0 or num_cards <= 1:
+        return "accent_top", False
+    return "accent_left", True
 
 
 def _build_card_element(
@@ -1123,8 +1177,13 @@ def _build_card_element(
     palette: dict,
     accents: List[str],
     coords_pct: Tuple[float, float, float, float],
+    theme: Optional[VisualTheme] = None,
 ) -> SlideElement:
-    """Một thẻ card với hình học theo layout_type, kèm màu accent riêng."""
+    """Một thẻ card với hình học theo layout_type, kèm màu accent riêng.
+
+    Biến thể thị giác (``variant``) và icon motif (``icon``) tạo nhịp khác nhau
+    cho từng vai trò card — xem `_card_variant_for`.
+    """
     x, y, w, h = coords_pct
     accent = _normalize_hex(card.color_theme, accents[card_index % len(accents)])
 
@@ -1139,6 +1198,17 @@ def _build_card_element(
         num_cards, layout, card_index, card.title,
         box_w_in=(w / 100.0) * SLIDE_W_IN,
     )
+
+    variant, use_icon = _card_variant_for(layout, card_index, num_cards)
+    icon: Optional[str] = None
+    if use_icon and theme:
+        if layout == LayoutType.BIG_STAT_CALLOUT and card_index == 0:
+            icon = theme.stat_icon      # icon xu hướng/đơn vị cho con số khổng lồ
+        elif layout == LayoutType.BIG_STAT_CALLOUT:
+            # lệch +1 để thẻ giải thích không trùng icon với con số khổng lồ
+            icon = card_icon_for(theme, card_index + 1)
+        else:
+            icon = card_icon_for(theme, card_index)
 
     return SlideElement(
         id=f"slide{slide_idx}_card{card_index}_{card.morph_id}",
@@ -1158,7 +1228,45 @@ def _build_card_element(
         shape_type="rounded_rectangle",
         border_color=palette["card_border"],
         step=(card_index + 1 if layout == LayoutType.TIMELINE_STEPS else None),
+        variant=variant,
+        icon=icon,
     )
+
+
+def _build_decoration_elements(
+    theme: VisualTheme,
+    slide_number: int,
+    palette: dict,
+    accents: List[str],
+    slide_w_in: float = SLIDE_W_IN,
+    slide_h_in: float = SLIDE_H_IN,
+) -> List[SlideElement]:
+    """Hoạ tiết nền RẤT MỜ (opacity 3-6%) cho slide thân bài.
+
+    Hoạ tiết thuộc ngữ cảnh chủ đề (chấm sao / lưới toạ độ / lattice chấm) nằm
+    DƯỚI mọi phần tử khác (đứng đầu danh sách elements → z-order thấp nhất ở
+    cả PPTX lẫn preview). KHÔNG mang morph_id để không tạo nhiễu Morph engine.
+    """
+    elements: List[SlideElement] = []
+    for i, deco in enumerate(pattern_decorations(
+        theme, slide_number, slide_w_in, slide_h_in
+    )):
+        color = accents[i % len(accents)] if deco["shape"] == "oval" else palette["card_border"]
+        elements.append(SlideElement(
+            id=f"slide{slide_number}_deco{i}",
+            type="decoration",
+            content="",
+            x=_pct_w(float(deco["x"])),
+            y=_pct_h(float(deco["y"])),
+            width=_pct_w(float(deco["w"])),
+            height=_pct_h(float(deco["h"])),
+            bg_color=color,
+            text_color=None,
+            morph_id="",
+            shape_type="oval" if deco["shape"] == "oval" else "rectangle",
+            opacity=float(deco["opacity"]),
+        ))
+    return elements
 
 
 def _build_step_elements(
@@ -1451,6 +1559,19 @@ def compute_layout(
     accents = _get_card_accents(effective_style)
     slides_out: List[Slide] = []
 
+    # Bộ motif thị giác theo ngữ cảnh chủ đề (ưu tiên lựa chọn của LLM,
+    # fallback suy luận keyword — luôn có ít nhất theme 'generic').
+    theme = resolve_visual_theme(
+        prompt=f"{getattr(req, 'prompt', '')} {getattr(raw, 'topic', '')}",
+        topic=raw.topic,
+        llm_hint=getattr(raw, "visual_theme", None),
+    )
+    slide_w_in = SLIDE_W_IN if req.aspect_ratio != "4:3" else 10.0
+    logger.info(
+        "Visual theme '%s' (%s) — icon/motif & hoạ tiết nền theo ngữ cảnh chủ đề.",
+        theme.key, theme.label,
+    )
+
     sorted_raw_slides = sorted(raw.slides, key=lambda s: s.slide_number)
     sorted_raw_slides = sorted_raw_slides[: req.num_slides]
     total = len(sorted_raw_slides)
@@ -1472,9 +1593,11 @@ def compute_layout(
 
         elements: List[SlideElement] = []
         slide_subtitle: Optional[str] = None
+        slide_bg = palette["bg"]
 
         # ------------------------------------------------------------------
         # MỞ BÀI — COVER_HERO: tiêu đề siêu lớn + subtitle + hàng badge
+        # Nền GRADIENT tối có dải sáng mờ màu chủ đề (thay màu đặc #0A0C12).
         # ------------------------------------------------------------------
         if layout == LayoutType.COVER_HERO:
             lead = sorted_cards[0]
@@ -1495,15 +1618,18 @@ def compute_layout(
                 badge_cards=badge_cards,
                 palette=palette,
                 accents=accents,
+                theme=theme,
             ))
             slide_subtitle = lead.title
+            slide_bg = cover_gradient_css(palette["bg"], accents[0], accents[1 % len(accents)])
 
         # ------------------------------------------------------------------
         # KẾT BÀI — CONCLUSION_SUMMARY: khung tổng kết + 3 điểm cốt lõi + CTA
+        # Nền GRADIENT dâng theo màu accent của CTA → cảm giác cao trào.
         # ------------------------------------------------------------------
         elif layout == LayoutType.CONCLUSION_SUMMARY:
             elements.append(_build_badge_element(slide_number, palette))
-            elements.append(_build_kicker_element(slide_number, section, palette))
+            elements.append(_build_kicker_element(slide_number, section, palette, theme))
             elements.append(_build_title_element(slide_number, raw_slide.slide_title, palette))
 
             row_cards, cta_card = _split_conclusion_cards(sorted_cards)
@@ -1517,11 +1643,20 @@ def compute_layout(
                 palette=palette,
                 accents=accents,
             ))
+            cta_accent = _normalize_hex(
+                cta_card.color_theme if cta_card else None, accents[-1]
+            )
+            slide_bg = closing_gradient_css(palette["bg"], cta_accent)
 
         # ------------------------------------------------------------------
         # THÂN BÀI — BIG_STAT_CALLOUT / ASYMMETRIC_GRID / TIMELINE_STEPS / CARDS_ROW
+        # Nền giữ màu đặc nhưng rải HOẠ TIẾT RẤT MỜ (3-6%) theo chủ đề —
+        # chấm sao / lưới toạ độ / lattice chấm — nằm dưới mọi phần tử khác.
         # ------------------------------------------------------------------
         else:
+            elements.extend(_build_decoration_elements(
+                theme, slide_number, palette, accents, slide_w_in, SLIDE_H_IN
+            ))
             card_coords_in = _calculate_cards_geometry_inches(layout, num_cards)
             card_coords_pct = [
                 (_pct_w(x), _pct_h(y), _pct_w(w), _pct_h(h))
@@ -1529,13 +1664,16 @@ def compute_layout(
             ]
 
             elements.append(_build_badge_element(slide_number, palette))
-            elements.append(_build_kicker_element(slide_number, section, palette))
+            elements.append(_build_kicker_element(slide_number, section, palette, theme))
             elements.append(_build_title_element(slide_number, raw_slide.slide_title, palette))
 
             for c_idx, card in enumerate(sorted_cards):
                 coords = card_coords_pct[c_idx] if c_idx < len(card_coords_pct) else card_coords_pct[-1]
                 elements.append(
-                    _build_card_element(card, c_idx, num_cards, slide_number, layout, palette, accents, coords)
+                    _build_card_element(
+                        card, c_idx, num_cards, slide_number, layout,
+                        palette, accents, coords, theme,
+                    )
                 )
 
             if layout == LayoutType.TIMELINE_STEPS:
@@ -1575,7 +1713,7 @@ def compute_layout(
             subtitle=slide_subtitle,
             speaker_notes=speaker_notes,
             morph_description=morph_desc,
-            bg_color=palette["bg"],
+            bg_color=slide_bg,
             layout_type=layout,
             elements=elements,
         ))
@@ -1593,6 +1731,9 @@ def compute_layout(
             f"({HERO_COL_RATIO:.0%}-{1 - HERO_COL_RATIO:.0%}) / TIMELINE_STEPS / CARDS_ROW "
             f"→ kết bài CONCLUSION_SUMMARY (3 card mỏng + CTA). "
             f"Lề thân bài M_x={MX_IN}\", khoảng cách G={GAP_IN}\". "
+            f"Visual theme '{theme.key}': icon motif {theme.kicker_icons[0]} cạnh kicker, "
+            f"hoạ tiết nền '{theme.pattern}' opacity 3-6% trên slide thân bài, nền gradient "
+            f"cho mở bài & kết bài, card biến thể accent_top/accent_left/outline. "
             f"Morph IDs nhất quán: badge_header, section_kicker, title_slide, title_rule, "
             f"cover_subtitle, call_to_action, step_*, footer_topic/page + card IDs."
         ),

@@ -30,7 +30,8 @@ export interface BackendSlideElement {
     | "kicker"
     | "footer"
     | "connector"
-    | "accent";
+    | "accent"
+    | "decoration";
   content: string;
   label?: string | null;
   sub_text?: string | null;
@@ -47,6 +48,13 @@ export interface BackendSlideElement {
   accent_color?: string | null;
   step?: number | null;
   align?: "left" | "center" | "right" | null;
+  /** Biến thể thị giác card: accent_top (thanh trên) | accent_left (viền trái dày)
+   * | outline (không nền + viền mỏng + icon) | cta (thanh CTA tô đặc). */
+  variant?: string | null;
+  /** Độ trong suốt (0.02-1) — hoạ tiết nền dùng 0.03-0.06, khớp alpha PPTX. */
+  opacity?: number | null;
+  /** Icon/motif theo ngữ cảnh chủ đề (emoji) đặt cạnh tiêu đề card / góc số lớn. */
+  icon?: string | null;
 }
 
 export interface BackendSlide {
