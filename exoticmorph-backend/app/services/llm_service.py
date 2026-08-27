@@ -1,26 +1,36 @@
 """
-LLM Service Module for ExoticMorph (v6 — Dynamic Layout Diversity + Dynamic Persona)
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+LLM Service Module for ExoticMorph (v7 — Narrative Arc + Creative Layouts)
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 Thay đổi cốt lõi:
 
-1. **DYNAMIC LAYOUT DIVERSITY (BỐ CỤC ĐA DẠNG THEO NGỮ CẢNH)**:
-   - Thay vì 100% slide đều có cùng bố cục nằm ngang cũ, LLM được hướng dẫn
-     chọn `layout_type` phù hợp ngữ cảnh từng slide:
-     * `SPLIT_HERO`     : Slide định nghĩa / khái niệm / hero highlight.
-     * `STAT_GRID`      : Slide nhấn mạnh số liệu / KPI / kết quả định lượng.
-     * `TIMELINE_STEPS` : Slide quy trình / tiến trình / lộ trình 3-4 bước ngang.
-     * `CARDS_ROW`      : Slide liệt kê 2-3 yếu tố ngang hàng / so sánh.
-     * `GRID_2X2`       : Slide phân loại 4 nhóm yếu tố, ma trận 4 góc cân đối.
-   - **ĐIỀU KIỆN BẮT BUỘC**: Trong một bài thuyết trình, KHÔNG ĐƯỢC để 2 slide
-     liên tiếp có cùng một `layout_type`.
+1. **NARRATIVE ARC 3 PHẦN (MỞ BÀI → THÂN BÀI → KẾT BÀI)**:
+   LLM bị ÉP sinh nội dung theo mạch kể chuyện chuẩn thuyết trình:
+   - Slide 1 (MỞ BÀI)        : `COVER_HERO` — câu hỏi dẫn dắt / đặt vấn đề ấn tượng.
+   - Slide 2..N-1 (THÂN BÀI) : `BIG_STAT_CALLOUT` / `ASYMMETRIC_GRID` /
+                               `TIMELINE_STEPS` / `CARDS_ROW` dùng XEN KẼ.
+   - Slide N (KẾT BÀI)       : `CONCLUSION_SUMMARY` — 3 điểm cốt lõi + call to action.
+   - **ĐIỀU KIỆN BẮT BUỘC**: KHÔNG ĐƯỢC để 2 slide liên tiếp có cùng `layout_type`;
+     `layout_engine.compute_layout()` cũng tự thực thi lại quy tắc này nên kể cả
+     khi LLM làm sai, file PPTX vẫn đúng mạch kể.
 
-2. **DYNAMIC PERSONA SYSTEM PROMPT**:
+2. **BỐ CỤC PHÁ CÁCH CHUẨN DESIGNER** (mỗi layout quy định rõ số thẻ & vai trò
+   từng thẻ để JSON luôn khớp Pydantic Schema):
+   * `COVER_HERO`        : tiêu đề siêu lớn 44-52pt + subtitle nổi bật + hàng badge.
+   * `BIG_STAT_CALLOUT`  : số khổng lồ 72pt+ bên trái, văn bản giải thích bên phải.
+   * `ASYMMETRIC_GRID`   : lưới bất đối xứng 60% - 40% (Hero + 2 thẻ phụ dọc).
+   * `TIMELINE_STEPS`    : quy trình 3-4 bước ngang.
+   * `CARDS_ROW`         : 2-3 thẻ ngang hàng.
+   * `CONCLUSION_SUMMARY`: khung viền tổng kết trung tâm + thanh Call To Action.
+   Các layout đời cũ `SPLIT_HERO`/`STAT_GRID`/`GRID_2X2` vẫn parse được (tương
+   thích ngược) và được tự nâng cấp lên bố cục mới tương đương.
+
+3. **DYNAMIC PERSONA SYSTEM PROMPT**:
    - LLM tự nhận diện lĩnh vực của chủ đề (Thiên văn, Lịch sử, Y học, Nông nghiệp,
      Công nghệ...) rồi NHẬP VAI chuyên gia hàng đầu lĩnh vực đó, dùng đúng từ vựng
      chuyên ngành. Mỗi slide bắt buộc chứa ít nhất 3 thuật ngữ/số liệu/sự thật
      chuyên ngành (Domain Vocabulary Rule) và cấm tuyệt đối văn mẫu B2B sáo rỗng.
 
-3. **JSON PARSE RETRY với THANG NHIỆT ĐỘ**:
+4. **JSON PARSE RETRY với THANG NHIỆT ĐỘ**:
    - Mỗi lần retry sau khi parse/validation thất bại dùng một temperature khác
      nhau (0.4 → 0.2 → 0.7) kèm feedback lỗi cụ thể.
 """
@@ -212,28 +222,28 @@ _FEW_SHOT_EXAMPLE_1 = json.dumps({
     "slides": [
         {
             "slide_number": 1,
-            "section": "[KHÁI NIỆM — bước 1 trong mạch kể]",
-            "slide_title": "[LUẬN ĐIỂM CỐT LÕI chứa thuật ngữ chuyên ngành + số liệu/mốc thời gian]",
-            "layout_type": "SPLIT_HERO",
+            "section": "[CÂU HỎI MỞ ĐẦU]",
+            "slide_title": "[CÂU HỎI DẪN DẮT 6-12 từ chứa số liệu/thuật ngữ chuyên ngành?]",
+            "layout_type": "COVER_HERO",
             "cards": [
                 {
-                    "morph_id": "hero_card",
-                    "title": "[KHẲNG ĐỊNH CỐT LÕI HERO: thực thể + đại lượng/sự kiện THẬT]",
-                    "description": "[2-4 câu diễn giải bằng GIỌNG CHUYÊN GIA của ngành: 3-4 thuật ngữ chuyên ngành + số liệu/đơn vị/ví dụ thật + quan hệ nhân quả. KHÔNG viết chung chung.]",
+                    "morph_id": "cover_hook",
+                    "title": "[CÂU HOOK 8-15 từ nêu vấn đề sẽ được giải đáp trong bài]",
+                    "description": "[1-2 câu bối cảnh mở màn: thuật ngữ chuyên ngành + số liệu/mốc thời gian thật để tạo sức nặng cho câu hỏi.]",
                     "color_theme": "#8B5CF6",
                     "order": 0,
                 },
                 {
-                    "morph_id": "sub_card_1",
-                    "title": "[CHIỀU CẠNH BỔ TRỢ 1: luận cứ hỗ trợ hero]",
-                    "description": "[2-4 câu: thuật ngữ + dẫn chứng + ý nghĩa thực tiễn, đúng chuyên môn ngành.]",
+                    "morph_id": "cover_badge_1",
+                    "title": "[NHÃN 1-3 TỪ]",
+                    "description": "[1 câu chú thích ngắn cho nhãn badge này.]",
                     "color_theme": "#10B981",
                     "order": 1,
                 },
                 {
-                    "morph_id": "sub_card_2",
-                    "title": "[CHIỀU CẠNH BỔ TRỢ 2: luận cứ tiếp theo]",
-                    "description": "[2-4 câu: thuật ngữ + con số/mốc thời gian + vì sao nó quan trọng.]",
+                    "morph_id": "cover_badge_2",
+                    "title": "[NHÃN 1-3 TỪ]",
+                    "description": "[1 câu chú thích ngắn cho nhãn badge này.]",
                     "color_theme": "#06B6D4",
                     "order": 2,
                 },
@@ -241,30 +251,59 @@ _FEW_SHOT_EXAMPLE_1 = json.dumps({
         },
         {
             "slide_number": 2,
-            "section": "[KẾT QUẢ ĐỊNH LƯỢNG — bước 2 trong mạch kể]",
-            "slide_title": "[CÁC CHỈ SỐ VÀ ĐẠI LƯỢNG ĐO LƯỜNG NỔI BẬT]",
-            "layout_type": "STAT_GRID",
+            "section": "[SỐ LIỆU ĐỊNH LƯỢNG]",
+            "slide_title": "[LUẬN ĐIỂM ĐỊNH LƯỢNG chính của phần thân bài]",
+            "layout_type": "BIG_STAT_CALLOUT",
             "cards": [
                 {
-                    "morph_id": "stat_card_1",
+                    "morph_id": "stat_hero",
                     "title": "[465 °C]",
-                    "description": "[Nhiệt độ bề mặt cực hạn do hiệu ứng nhà kính mất kiểm soát, cao hơn cả Thủy Tinh gần Mặt Trời hơn.]",
+                    "description": "[2-3 câu giải thích con số khổng lồ bên trái: nó đo cái gì, so với chuẩn nào, vì sao đáng kinh ngạc.]",
                     "color_theme": "#8B5CF6",
                     "order": 0,
                 },
                 {
-                    "morph_id": "stat_card_2",
-                    "title": "[1.989×10³⁰ kg]",
-                    "description": "[Khối lượng Mặt Trời chiếm tới 99.86% tổng khối lượng toàn bộ hệ thống hành tinh.]",
+                    "morph_id": "stat_context",
+                    "title": "[BỐI CẢNH GIẢI THÍCH CHO CON SỐ]",
+                    "description": "[2-3 câu: cơ chế tạo ra con số, thuật ngữ chuyên ngành, hệ quả thực tế.]",
+                    "color_theme": "#10B981",
+                    "order": 1,
+                },
+            ],
+        },
+        {
+            "slide_number": 3,
+            "section": "[KẾT LUẬN]",
+            "slide_title": "[THÔNG ĐIỆP CHỐT — khẳng định, không phải câu hỏi]",
+            "layout_type": "CONCLUSION_SUMMARY",
+            "cards": [
+                {
+                    "morph_id": "takeaway_1",
+                    "title": "[BÀI HỌC RÚT RA 4-10 từ]",
+                    "description": "[1-2 câu tóm gọn bằng chứng quan trọng nhất cho điểm cốt lõi này.]",
+                    "color_theme": "#8B5CF6",
+                    "order": 0,
+                },
+                {
+                    "morph_id": "takeaway_2",
+                    "title": "[BÀI HỌC RÚT RA 4-10 từ]",
+                    "description": "[1-2 câu tóm gọn bằng chứng cho điểm cốt lõi thứ hai.]",
                     "color_theme": "#10B981",
                     "order": 1,
                 },
                 {
-                    "morph_id": "stat_card_3",
-                    "title": "[88 ngày]",
-                    "description": "[Chu kỳ quỹ đạo elip siêu tốc của Thủy Tinh quanh Mặt Trời với vận tốc 47 km/s.]",
+                    "morph_id": "takeaway_3",
+                    "title": "[BÀI HỌC RÚT RA 4-10 từ]",
+                    "description": "[1-2 câu tóm gọn bằng chứng cho điểm cốt lõi thứ ba.]",
                     "color_theme": "#06B6D4",
                     "order": 2,
+                },
+                {
+                    "morph_id": "call_to_action",
+                    "title": "[ĐỘNG TỪ + hành động cụ thể người nghe làm ngay]",
+                    "description": "[1-2 câu nêu bước thực hiện đầu tiên, mốc thời gian hoặc công cụ cụ thể.]",
+                    "color_theme": "#EC4899",
+                    "order": 3,
                 },
             ],
         },
@@ -275,7 +314,7 @@ _FEW_SHOT_EXAMPLE_2 = json.dumps({
     "topic": "[CHỦ ĐỀ KHÁC CỦA NGƯỜI DÙNG]",
     "slides": [
         {
-            "slide_number": 1,
+            "slide_number": 3,
             "section": "[LỘ TRÌNH THỰC THI]",
             "slide_title": "[CHU TRÌNH 4 BƯỚC TIẾN TRÌNH THEO THỨ TỰ THỜI GIAN]",
             "layout_type": "TIMELINE_STEPS",
@@ -376,7 +415,95 @@ KHÔNG bịa số liệu giả. Nếu không chắc, dùng kiến thức nền �
 phổ biến của ngành, hoặc nêu phạm vi/ước lượng thận trọng ("ước tính", "khoảng").
 
 ══════════════════════════════════════════════════════════════════════
-BƯỚC 4 — NỘI DUNG SÂU & MẠCH KỂ THEO LĨNH VỰC
+BƯỚC 4 — CẤU TRÚC 3 PHẦN BẮT BUỘC (NARRATIVE ARC)
+══════════════════════════════════════════════════════════════════════
+
+Mọi bài thuyết trình đều PHẢI có đủ 3 phần theo đúng thứ tự:
+
+┌─ PHẦN 1 · MỞ BÀI = SLIDE ĐẦU TIÊN (slide_number 1) ────────────────┐
+│ layout_type BẮT BUỘC = "COVER_HERO".                              │
+│ Nhiệm vụ: ĐẶT VẤN ĐỀ bằng một câu hỏi dẫn dắt hoặc một tuyên bố   │
+│ gây tò mò, khiến người xem muốn nghe tiếp.                        │
+└────────────────────────────────────────────────────────────────────┘
+┌─ PHẦN 2 · THÂN BÀI = SLIDE 2 → SLIDE N-1 ─────────────────────────┐
+│ Phân tích, chứng minh bằng DỮ LIỆU / CƠ CHẾ / QUY TRÌNH.          │
+│ Mỗi slide một luận điểm; dùng XEN KẼ các bố cục ở BƯỚC 5.          │
+└────────────────────────────────────────────────────────────────────┘
+┌─ PHẦN 3 · KẾT BÀI = SLIDE CUỐI CÙNG (slide_number N) ─────────────┐
+│ layout_type BẮT BUỘC = "CONCLUSION_SUMMARY".                      │
+│ Nhiệm vụ: TÓM TẮT thông điệp cốt lõi (3 điểm) + BÀI HỌC RÚT RA    │
+│ + lời kêu gọi hành động cụ thể.                                   │
+└────────────────────────────────────────────────────────────────────┘
+
+Trường hợp đặc biệt:
+- num_slides = 1 → chỉ có slide MỞ BÀI (COVER_HERO), vẫn phải nêu được vấn đề.
+- num_slides = 2 → slide 1 = COVER_HERO, slide 2 = CONCLUSION_SUMMARY.
+- num_slides >= 3 → đầy đủ 3 phần như sơ đồ trên.
+
+`section` của từng slide phải phản ánh đúng vị trí trong mạch kể (viết HOA, ngắn):
+mở bài dùng nhãn dạng "CÂU HỎI MỞ ĐẦU"/"VẤN ĐỀ"/"BỐI CẢNH"; thân bài dùng nhãn
+chuyên môn ("CẤU TẠO", "CƠ CHẾ", "SỐ LIỆU", "SƠ CHẾ", "DI SẢN"...); kết bài dùng
+"KẾT LUẬN"/"BÀI HỌC RÚT RA"/"HÀNH ĐỘNG". KHÔNG dùng nhãn sáo rỗng trong STRICT BAN.
+
+══════════════════════════════════════════════════════════════════════
+BƯỚC 5 — PHÂN BỔ BỐ CỤC PHÁ CÁCH (CREATIVE LAYOUT ALLOCATION)
+══════════════════════════════════════════════════════════════════════
+
+Trường `layout_type` quyết định hình học slide. Python sẽ tự vẽ; bạn phải chọn
+ĐÚNG bố cục và cung cấp ĐÚNG số thẻ với đúng vai trò của từng thẻ.
+
+▸ SLIDE 1 (MỞ BÀI) — `layout_type = "COVER_HERO"` — ĐÚNG 3 thẻ
+  Thiết kế: tiêu đề SIÊU LỚN lệch trái + subtitle nổi bật + hàng badge.
+  • `slide_title` : tiêu đề 6-12 từ, là CÂU HỎI DẪN DẮT hoặc tuyên bố gây sốc,
+                    chứa số liệu/thuật ngữ chuyên ngành.
+  • `cards[0]`    : CÂU HOOK (subtitle) — `title` là câu dẫn 8-15 từ nêu vấn đề;
+                    `description` là 1-2 câu bối cảnh kèm số liệu thật.
+  • `cards[1..2]` : BADGE — `title` là nhãn CỰC NGẮN 1-3 từ (VIẾT HOA hoặc một
+                    đại lượng, vd "KHÍ QUYỂN", "465 °C", "RUNAWAY GHG");
+                    `description` là 1 câu chú thích ngắn cho nhãn đó.
+
+▸ SLIDE 2 → SLIDE N-1 (THÂN BÀI) — DÙNG XEN KẼ 4 bố cục sau:
+
+  1. `BIG_STAT_CALLOUT` — ĐÚNG 2-3 thẻ
+     Số liệu khổng lồ bên trái, văn bản giải thích bên phải.
+     • `cards[0]` : CON SỐ / TỪ KHÓA KHỔNG LỒ — `title` càng ngắn càng tốt
+       ("92 bar", "465 °C", "+35%", "1.989×10³⁰ kg"); `description` giải thích
+       ý nghĩa của con số đó (2-3 câu, có so sánh để dễ hình dung).
+     • `cards[1..]` : văn bản giải thích bổ trợ, mỗi thẻ 2-3 câu.
+
+  2. `ASYMMETRIC_GRID` — ĐÚNG 3 thẻ
+     Lưới bất đối xứng: thẻ Hero chiếm 60% chiều rộng, 2 thẻ phụ xếp dọc 40%.
+     • `cards[0]` : HERO — luận điểm chính của slide, `title` 6-12 từ,
+       `description` là đoạn sâu nhất slide (3-5 câu).
+     • `cards[1]`, `cards[2]` : thẻ phụ bổ trợ, `title` 3-6 từ, `description` 2-3 câu.
+
+  3. `TIMELINE_STEPS` — ĐÚNG 3-4 thẻ
+     Quy trình/tiến trình theo thứ tự thời gian, mỗi thẻ là MỘT BƯỚC.
+     `title` nêu tên bước + mốc thời gian; `description` mô tả điều xảy ra ở bước đó.
+
+  4. `CARDS_ROW` — ĐÚNG 2-3 thẻ
+     Các yếu tố ngang hàng: so sánh, nguyên nhân - hệ quả, các trụ cột.
+
+▸ SLIDE N (KẾT BÀI) — `layout_type = "CONCLUSION_SUMMARY"` — ĐÚNG 4 thẻ
+  Thiết kế: khung viền tổng kết ở trung tâm chứa 3 điểm cốt lõi + thanh CTA.
+  • `cards[0..2]` : 3 ĐIỂM CỐT LÕI — `title` là bài học rút ra (4-10 từ, khẳng định);
+                    `description` 1-2 câu tóm gọn bằng chứng.
+  • `cards[3]`    : CALL TO ACTION — `title` là lời kêu gọi hành động BẮT ĐẦU BẰNG
+                    ĐỘNG TỪ ("Theo dõi...", "Áp dụng...", "Đầu tư...");
+                    `description` nêu bước thực hiện đầu tiên, cụ thể.
+
+⚠️ QUY TẮC CỨNG (CRITICAL RULES):
+1. TUYỆT ĐỐI KHÔNG dùng cùng một `layout_type` cho 2 slide LIÊN TIẾP.
+2. KHÔNG dùng `COVER_HERO` hoặc `CONCLUSION_SUMMARY` ở giữa bài.
+3. KHÔNG dùng `COVER_HERO` cho slide cuối, và KHÔNG dùng `CONCLUSION_SUMMARY`
+   cho slide đầu.
+4. Với num_slides = 5, một chuỗi bố cục hợp lệ là:
+   COVER_HERO → BIG_STAT_CALLOUT → ASYMMETRIC_GRID → TIMELINE_STEPS → CONCLUSION_SUMMARY.
+5. Các bố cục đời cũ `SPLIT_HERO`, `STAT_GRID`, `GRID_2X2` KHÔNG được dùng nữa
+   (hệ thống sẽ tự nâng cấp chúng sang bố cục mới tương đương).
+
+══════════════════════════════════════════════════════════════════════
+BƯỚC 6 — NỘI DUNG SÂU & MẠCH KỂ THEO LĨNH VỰC
 ══════════════════════════════════════════════════════════════════════
 
 A. **MỖI TIÊU ĐỀ LÀ MỘT KHẲNG ĐỊNH CỤ THỂ**, không phải nhãn danh mục.
@@ -384,64 +511,26 @@ A. **MỖI TIÊU ĐỀ LÀ MỘT KHẲNG ĐỊNH CỤ THỂ**, không phải nh�
    - ĐÚNG: "Robusta chiếm ~90% diện tích cà phê Việt Nam".
    - SAI:  "Tổng quan hệ mặt trời". / "Nhu cầu cà phê đang tăng tốc".
    - `title` dài 1-10 từ; chứa thực thể/thuật ngữ hoặc con số của chính chủ đề.
+     (Riêng slide COVER_HERO và CONCLUSION_SUMMARY được phép dài tới 12-15 từ.)
 
 B. **THẺ GỒM 2 PHẦN**: `title` = khẳng định ngắn hoặc con số; `description` = đoạn
    diễn giải hoặc label súc tích giải thích cơ chế, kèm thuật ngữ/số liệu/quan hệ
    nhân quả như đã nêu ở BƯỚC 3.
 
-C. **MẠCH KỂ LINH HOẠT THEO LĨNH VỰC** — chọn mạch tự nhiên nhất:
-   - KHOA HỌC / KHÁM PHÁ: Khái quát → Cấu tạo/Thành phần → Cơ chế vận hành →
-     Điểm kỳ thú / Khám phá mới → Ý nghĩa.
-   - LỊCH SỬ / VĂN HÓA: Bối cảnh → Diễn biến chính → Bước ngoặt → Hệ quả → Di sản.
-   - Y KHOA / SỨC KHỎE: Căn nguyên → Cơ chế → Biểu hiện → Phòng ngừa → Điều trị.
-   - CÔNG NGHỆ: Thành phần/Kiến trúc → Nguyên lý hoạt động → Ứng dụng →
-     Tác động → Hướng phát triển.
-   - ẨM THỰC / NÔNG SẢN: Nguồn gốc/Giống & vùng trồng → Canh tác/Thu hoạch →
-     Sơ chế/Chế biến → Phẩm vị/Trải nghiệm → Vị thế thị trường.
+C. **CHỌN MẠCH THÂN BÀI TỰ NHIÊN NHẤT THEO LĨNH VỰC** (nằm giữa MỞ BÀI và KẾT BÀI):
+   - KHOA HỌC / KHÁM PHÁ: Cấu tạo/Thành phần → Cơ chế vận hành → Điểm kỳ thú /
+     Khám phá mới → Ý nghĩa.
+   - LỊCH SỬ / VĂN HÓA: Bối cảnh → Diễn biến chính → Bước ngoặt → Hệ quả.
+   - Y KHOA / SỨC KHỎE: Căn nguyên → Cơ chế → Biểu hiện → Phòng ngừa/Điều trị.
+   - CÔNG NGHỆ: Kiến trúc → Nguyên lý hoạt động → Ứng dụng → Tác động.
+   - ẨM THỰC / NÔNG SẢN: Giống & vùng trồng → Canh tác/Thu hoạch → Sơ chế/Chế biến →
+     Phẩm vị/Vị thế thị trường.
    - KINH DOANH (chỉ khi chủ đề thật sự là kinh doanh): Vấn đề → Nguyên nhân →
-     Giải pháp → Kết quả → Hành động.
+     Giải pháp → Kết quả.
    - Slide sau nối tiếp slide trước, không rời rạc, không lặp lại.
-   - `section` = nhãn mục VIẾT HOA ngắn gọn thể hiện vị trí trong mạch đã chọn
-     (vd "CẤU TẠO", "CƠ CHẾ", "SƠ CHẾ", "DI SẢN"...), KHÔNG dùng nhãn sáo rỗng
-     đã liệt kê trong STRICT BAN.
 
 ══════════════════════════════════════════════════════════════════════
-BƯỚC 5 — QUY TẮC CHỌN BỐ CỤC ĐA DẠNG (DYNAMIC LAYOUT DIVERSITY)
-══════════════════════════════════════════════════════════════════════
-
-BẮT BUỘC chọn trường `layout_type` phù hợp cho TỪNG SLIDE dựa vào bản chất nội dung:
-
-1. `SPLIT_HERO`:
-   - Dành cho: Slide định nghĩa, khái niệm cốt lõi, tuyên bố trọng tâm (hero highlight).
-   - Cấu trúc: Cột trái rộng chứa luận điểm chính (Hero point), cột phải xếp 2 thẻ phụ bổ trợ.
-   - Số thẻ: Thường gồm 3 thẻ (Card 0 = Hero, Card 1 & 2 = Thẻ phụ).
-
-2. `STAT_GRID`:
-   - Dành cho: Slide có số liệu, chỉ số KPI, kết quả đo lường, minh chứng định lượng.
-   - Cấu trúc: Nhấn mạnh số liệu (title là con số/đại lượng to nổi bật như '465 °C', '+35%', '1.989×10³⁰ kg', '90%') + description là label ngắn/giải thích ý nghĩa.
-   - Số thẻ: 2-4 thẻ số liệu.
-
-3. `TIMELINE_STEPS`:
-   - Dành cho: Slide quy trình, tiến trình, lộ trình, chuỗi các bước thực hiện theo thứ tự thời gian.
-   - Cấu trúc: Tiến trình 3-4 bước theo chiều ngang có vòng tròn số thứ tự và đường nối.
-   - Số thẻ: 3-4 thẻ.
-
-4. `CARDS_ROW`:
-   - Dành cho: Slide liệt kê 2-3 yếu tố ngang hàng, so sánh các chiều cạnh.
-   - Cấu trúc: 2-3 thẻ nằm ngang cân đối.
-   - Số thẻ: 2-3 thẻ.
-
-5. `GRID_2X2`:
-   - Dành cho: Slide phân loại 4 nhóm yếu tố, ma trận 4 góc cân đối, 4 trụ cột.
-   - Cấu trúc: Đúng 4 thẻ chia đều thành lưới 2 hàng x 2 cột.
-   - Số thẻ: 4 thẻ.
-
-⚠️ ĐIỀU KIỆN TIÊN QUYẾT BẮT BUỘC (CRITICAL DIVERSITY RULE):
-- Trong cùng một bài thuyết trình, TUYỆT ĐỐI KHÔNG ĐƯỢC để 2 slide liên tiếp có cùng một `layout_type`.
-- Phải luân chuyển linh hoạt giữa các layout để tạo trải nghiệm thị giác đa dạng, hấp dẫn người xem (ví dụ: Slide 1: SPLIT_HERO → Slide 2: STAT_GRID → Slide 3: TIMELINE_STEPS → Slide 4: GRID_2X2 → Slide 5: CARDS_ROW).
-
-══════════════════════════════════════════════════════════════════════
-BƯỚC 6 — CÁC QUY TẮC CẤU TRÚC JSON (STRUCTURAL RULES)
+BƯỚC 7 — CÁC QUY TẮC CẤU TRÚC JSON (STRUCTURAL RULES)
 ══════════════════════════════════════════════════════════════════════
 
 1. **CHỈ NỘI DUNG & LAYOUT_TYPE, KHÔNG HÌNH HỌC**: KHÔNG trả `x/y/width/height` — Python tự
@@ -468,21 +557,29 @@ BƯỚC 6 — CÁC QUY TẮC CẤU TRÚC JSON (STRUCTURAL RULES)
 KHÔNG SAO CHÉP; PHẢI THAY BẰNG NỘI DUNG THẬT VỀ USER TOPIC]
 ══════════════════════════════════════════════════════════════════════
 
-VÍ DỤ 1 — 2 slide, phối hợp SPLIT_HERO và STAT_GRID, morph_id giữ nguyên:
+VÍ DỤ 1 — 3 slide theo đúng MẠCH KỂ 3 PHẦN: COVER_HERO (mở bài) →
+BIG_STAT_CALLOUT (thân bài) → CONCLUSION_SUMMARY (kết bài). morph_id giữ nguyên
+cho đối tượng lặp lại giữa các slide:
 
 __EXAMPLE_1__
 
 ---
-VÍ DỤ 2 — 1 slide dạng tiến trình TIMELINE_STEPS (4 thẻ):
+VÍ DỤ 2 — 1 slide THÂN BÀI dạng tiến trình TIMELINE_STEPS (4 thẻ, số thứ tự
+do Python tự vẽ):
 
 __EXAMPLE_2__
 
 ══════════════════════════════════════════════════════════════════════
 HÃY BẮT ĐẦU
 ══════════════════════════════════════════════════════════════════════
-Đọc kỹ "=== USER TOPIC TO GENERATE ===", NHẬP VAI chuyên gia đúng lĩnh vực,
-chọn layout_type đa dạng giữa các slide theo đúng quy tắc, viết nội dung 100%
-bám sát chủ đề bằng từ vựng chuyên ngành thật, theo đúng cấu trúc JSON đã minh hoạ.
+Đọc kỹ "=== USER TOPIC TO GENERATE ===" rồi làm đúng 3 việc:
+1. NHẬP VAI chuyên gia đúng lĩnh vực của chủ đề.
+2. DÀN Ý theo MẠCH KỂ 3 PHẦN: slide 1 = COVER_HERO (câu hỏi dẫn dắt), các slide
+   giữa = BIG_STAT_CALLOUT / ASYMMETRIC_GRID / TIMELINE_STEPS / CARDS_ROW dùng
+   XEN KẼ (không lặp 2 slide liên tiếp), slide cuối = CONCLUSION_SUMMARY
+   (3 điểm cốt lõi + call to action).
+3. VIẾT nội dung 100% bám sát chủ đề bằng từ vựng chuyên ngành thật, đúng số
+   thẻ và đúng vai trò từng thẻ của bố cục đã chọn, theo cấu trúc JSON đã minh hoạ.
 """
 
 SYSTEM_PROMPT = (
@@ -626,6 +723,26 @@ def _build_user_prompt(req: GenerateRequest) -> str:
         req.prompt[:120], req.num_slides, req.style, lang,
     )
 
+    n = req.num_slides
+    if n <= 1:
+        arc_line = (
+            "- MẠCH KỂ: chỉ 1 slide → BẮT BUỘC layout_type='COVER_HERO' "
+            "(slide mở bài nêu vấn đề/câu hỏi dẫn dắt)."
+        )
+    elif n == 2:
+        arc_line = (
+            "- MẠCH KỂ 3 PHẦN (rút gọn): slide 1 BẮT BUỘC 'COVER_HERO' (câu hỏi dẫn dắt) "
+            "→ slide 2 BẮT BUỘC 'CONCLUSION_SUMMARY' (3 điểm cốt lõi + call to action)."
+        )
+    else:
+        arc_line = (
+            f"- MẠCH KỂ 3 PHẦN (BẮT BUỘC): slide 1 = 'COVER_HERO' (câu hỏi dẫn dắt, 3 thẻ: "
+            f"1 hook + 2 badge) → slide 2..{n - 1} = thân bài dùng XEN KẼ 'BIG_STAT_CALLOUT' "
+            f"(2-3 thẻ), 'ASYMMETRIC_GRID' (đúng 3 thẻ), 'TIMELINE_STEPS' (3-4 thẻ), "
+            f"'CARDS_ROW' (2-3 thẻ) → slide {n} = 'CONCLUSION_SUMMARY' "
+            f"(đúng 4 thẻ: 3 điểm cốt lõi + 1 call to action)."
+        )
+
     return (
         "================================================================\n"
         "=== USER TOPIC TO GENERATE ===\n"
@@ -640,10 +757,10 @@ def _build_user_prompt(req: GenerateRequest) -> str:
         f"- Tỉ lệ khung hình: {req.aspect_ratio}\n"
         f"- Ngôn ngữ nội dung (toàn bộ title/description dùng ngôn ngữ này): {lang}\n"
         f"- Sinh speaker notes: {'Có' if req.include_speaker_notes else 'Không'}\n"
-        "- BẮT BUỘC CHỌN layout_type ĐA DẠNG CHO TỪNG SLIDE: SPLIT_HERO (định nghĩa/khái niệm), "
-        "STAT_GRID (số liệu/kết quả), TIMELINE_STEPS (quy trình/bước), CARDS_ROW hoặc "
-        "GRID_2X2 (liệt kê/ma trận).\n"
-        "- ĐIỀU KIỆN BẮT BUỘC: KHÔNG ĐƯỢC để 2 slide liên tiếp có cùng một layout_type.\n\n"
+        f"{arc_line}\n"
+        "- ĐIỀU KIỆN BẮT BUỘC: KHÔNG ĐƯỢC để 2 slide liên tiếp có cùng một layout_type; "
+        "KHÔNG dùng COVER_HERO/CONCLUSION_SUMMARY ở giữa bài; KHÔNG dùng các layout cũ "
+        "SPLIT_HERO/STAT_GRID/GRID_2X2.\n\n"
         "NHẮC LẠI TRỰC TIẾP: Trước hết NHẬP VAI chuyên gia đúng lĩnh vực của "
         "chủ đề trên; mọi nội dung (topic, slide_title, title, description) phải "
         "BÁM SÁT 100% chủ đề đó với từ vựng chuyên ngành thật; tuyệt đối không "
@@ -741,9 +858,12 @@ async def _parse_with_retry(
                 user_prompt_text
                 + f"\n\n=== LỖI LẦN TRƯỚC (HÃY SỬA) ===\n{last_error}\n\n"
                 + "Hãy trả về JSON ĐÃ SỬA: nhập vai chuyên gia đúng lĩnh vực, dùng "
-                + "từ vựng chuyên ngành thật, chọn layout_type đa dạng giữa các slide "
-                + "(không để 2 slide liên tiếp cùng layout_type), không dùng văn mẫu "
-                + "bị cấm, đúng schema, không giải thích."
+                + "từ vựng chuyên ngành thật, tuân thủ MẠCH KỂ 3 PHẦN "
+                + "(slide 1 = COVER_HERO, slide cuối = CONCLUSION_SUMMARY, thân bài "
+                + "dùng XEN KẼ BIG_STAT_CALLOUT / ASYMMETRIC_GRID / TIMELINE_STEPS / "
+                + "CARDS_ROW — không để 2 slide liên tiếp cùng layout_type), đúng số "
+                + "thẻ của từng bố cục, không dùng văn mẫu bị cấm, đúng schema, "
+                + "không giải thích."
             )
 
         messages = build_messages(user_prompt_text)

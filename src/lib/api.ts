@@ -220,16 +220,40 @@ export async function generatePresentationPreview(
         step: c.step ?? undefined,
       }));
 
-    // Các phần tử chữ khác (heading/kicker) dùng cho bullet fallback.
+    // Các phần tử chữ khác (heading/text) dùng cho bullet fallback.
+    // Loại trừ tiêu đề & subtitle của slide vì chúng đã hiển thị ở header
+    // (tránh lặp chữ trên slide mở bài COVER_HERO).
     const bulletPoints = s.elements
-      .filter((e) => e.type === "text" || e.type === "heading")
+      .filter(
+        (e) =>
+          (e.type === "text" || e.type === "heading") &&
+          e.content !== s.title &&
+          e.content !== s.subtitle,
+      )
       .map((c) => (c.label ? `[${c.label}] ${c.content}` : c.content));
 
+    // Badge nội dung (badge của slide COVER_HERO) → hiển thị dạng tag nhỏ.
+    // Bỏ qua badge đếm trang "SLIDE 01" và vòng tròn số thứ tự của timeline.
+    const contentBadges = s.elements
+      .filter(
+        (e) =>
+          e.type === "badge" &&
+          !!e.content.trim() &&
+          !/^SLIDE\s*\d+$/i.test(e.content.trim()) &&
+          !/^\d+$/.test(e.content.trim()),
+      )
+      .map((e) => e.content.trim());
+
     const rawLayout = s.layout_type?.toUpperCase() || "";
+    const isLast = idx === data.slides.length - 1;
     const slideLayoutType: SlideItem["layoutType"] =
-      idx === 0
+      rawLayout === "COVER_HERO" || (idx === 0 && !rawLayout)
         ? "title-hero"
-        : rawLayout === "STAT_GRID" || metrics.length > 0
+        : rawLayout === "CONCLUSION_SUMMARY" || (isLast && !rawLayout)
+        ? "conclusion"
+        : rawLayout === "BIG_STAT_CALLOUT" ||
+          rawLayout === "STAT_GRID" ||
+          metrics.length > 0
         ? "metrics-grid"
         : rawLayout === "TIMELINE_STEPS"
         ? "timeline-step"
@@ -260,7 +284,7 @@ export async function generatePresentationPreview(
       speakerNotes:
         s.speaker_notes?.trim() ||
         `Lời dẫn slide ${s.slide_number}: Trình bày chi tiết về ${s.title}...`,
-      tags: [data.style, `Slide-${s.slide_number}`],
+      tags: [data.style, `Slide-${s.slide_number}`, ...contentBadges.slice(0, 3)],
     };
   });
 

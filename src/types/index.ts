@@ -55,10 +55,14 @@ export interface BackendSlide {
     | "features"
     | "roadmap"
     | "grid"
+    | "COVER_HERO"
+    | "BIG_STAT_CALLOUT"
+    | "ASYMMETRIC_GRID"
     | "CARDS_ROW"
+    | "TIMELINE_STEPS"
+    | "CONCLUSION_SUMMARY"
     | "SPLIT_HERO"
     | "STAT_GRID"
-    | "TIMELINE_STEPS"
     | "GRID_2X2"
     | (string & {});
   elements: BackendSlideElement[];
