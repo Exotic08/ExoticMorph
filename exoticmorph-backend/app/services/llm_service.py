@@ -1,27 +1,28 @@
 """
-LLM Service Module for ExoticMorph (v5 — LLM-only, Dynamic Persona)
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-Thay đổi nền tảng so với v4:
+LLM Service Module for ExoticMorph (v6 — Dynamic Layout Diversity + Dynamic Persona)
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Thay đổi cốt lõi:
 
-1. **XÓA BỎ HOÀN TOÀN Heuristic Fallback ghép chuỗi ``{topic}``** — các văn mẫu
-   B2B rác như "Nhu cầu ... đang tăng tốc", "Điểm nghẽn đang kìm hãm tiến độ",
-   "Cái giá của việc chần chừ", "Vì sao ... trở thành ưu tiên chiến lược số một"
-   đã bị loại bỏ khỏi codebase. Khi LLM thất bại, backend KHÔNG âm thầm trả về
-   slide kém chất lượng nữa (chấm dứt *silent fallback*), mà raise
-   :class:`LLMGenerationError` kèm chẩn đoán rõ ràng (API key sai / hết quota /
-   timeout mạng / parse JSON thất bại) để routes trả HTTP 502 cho người dùng.
+1. **DYNAMIC LAYOUT DIVERSITY (BỐ CỤC ĐA DẠNG THEO NGỮ CẢNH)**:
+   - Thay vì 100% slide đều có cùng bố cục nằm ngang cũ, LLM được hướng dẫn
+     chọn `layout_type` phù hợp ngữ cảnh từng slide:
+     * `SPLIT_HERO`     : Slide định nghĩa / khái niệm / hero highlight.
+     * `STAT_GRID`      : Slide nhấn mạnh số liệu / KPI / kết quả định lượng.
+     * `TIMELINE_STEPS` : Slide quy trình / tiến trình / lộ trình 3-4 bước ngang.
+     * `CARDS_ROW`      : Slide liệt kê 2-3 yếu tố ngang hàng / so sánh.
+     * `GRID_2X2`       : Slide phân loại 4 nhóm yếu tố, ma trận 4 góc cân đối.
+   - **ĐIỀU KIỆN BẮT BUỘC**: Trong một bài thuyết trình, KHÔNG ĐƯỢC để 2 slide
+     liên tiếp có cùng một `layout_type`.
 
-2. **DYNAMIC PERSONA SYSTEM PROMPT** — LLM tự nhận diện lĩnh vực của chủ đề
-   (Thiên văn, Lịch sử, Y học, Nông nghiệp, Công nghệ...) rồi NHẬP VAI chuyên
-   gia hàng đầu lĩnh vực đó, dùng đúng từ vựng chuyên ngành (Thủy tinh, quỹ
-   đạo elip, Robusta, Buôn Ma Thuột...). Mỗi slide bắt buộc chứa ít nhất 3
-   thuật ngữ/số liệu/sự thật chuyên ngành (Domain Vocabulary Rule) và cấm
-   tuyệt đối mọi tiêu đề ghép từ vô nghĩa.
+2. **DYNAMIC PERSONA SYSTEM PROMPT**:
+   - LLM tự nhận diện lĩnh vực của chủ đề (Thiên văn, Lịch sử, Y học, Nông nghiệp,
+     Công nghệ...) rồi NHẬP VAI chuyên gia hàng đầu lĩnh vực đó, dùng đúng từ vựng
+     chuyên ngành. Mỗi slide bắt buộc chứa ít nhất 3 thuật ngữ/số liệu/sự thật
+     chuyên ngành (Domain Vocabulary Rule) và cấm tuyệt đối văn mẫu B2B sáo rỗng.
 
-3. **JSON PARSE RETRY với THANG NHIỆT ĐỘ** — mỗi lần retry sau khi parse/
-   validation thất bại dùng một temperature khác nhau (0.4 → 0.2 → 0.7): hạ
-   nhiệt để bám schema chặt hơn, rồi tăng nhiệt để thoát khỏi output lỗi lặp.
-   Chỉ chấp nhận thất bại sau khi đã hết toàn bộ lần thử.
+3. **JSON PARSE RETRY với THANG NHIỆT ĐỘ**:
+   - Mỗi lần retry sau khi parse/validation thất bại dùng một temperature khác
+     nhau (0.4 → 0.2 → 0.7) kèm feedback lỗi cụ thể.
 """
 
 import asyncio
@@ -35,6 +36,9 @@ from app.schemas.slide_schema import (
     GenerateRequest,
     LLMOutput,
     PresentationResponse,
+    LayoutType,
+    SlideData,
+    RawSlideContent,
 )
 from app.services.layout_engine import compute_layout
 
@@ -75,10 +79,6 @@ class LLMConfigurationError(LLMGenerationError):
 # =============================================================================
 # MASK BÍ MẬT TRƯỚC KHI LOG / TRẢ VỀ CLIENT
 # =============================================================================
-# Lỗi từ Google GenAI đôi khi kèm nguyên URL chứa ?key=AIza..., hoặc message
-# dán lại API key. Mọi chuỗi lỗi trước khi in log hay trả HTTP detail đều phải
-# đi qua hàm này.
-
 _KEY_PARAM_RE = re.compile(r"([?&]key=)[A-Za-z0-9_\-]{4,}", re.IGNORECASE)
 
 
@@ -134,15 +134,7 @@ _HINTS_BY_REASON = {
 
 
 def _diagnose_exception(exc: Exception, provider_name: str) -> Tuple[str, str]:
-    """Phân loại exception LLM → (lý do chuẩn hóa, gợi ý khắc phục).
-
-    Hỗ trợ cả 2 họ exception:
-      - OpenAI SDK:    AuthenticationError(401) / PermissionDeniedError(403) /
-                       RateLimitError(429) — có thuộc tính ``status_code``.
-      - Google GenAI:  Unauthenticated / PermissionDenied / ResourceExhausted
-                       (google.api_core.exceptions.*) — phân loại qua tên class
-                       và HTTP code 400/401/403/429 lồng trong message.
-    """
+    """Phân loại exception LLM → (lý do chuẩn hóa, gợi ý khắc phục)."""
     cls_name = type(exc).__name__
     combined = f"{cls_name} {exc}".lower()
 
@@ -150,11 +142,10 @@ def _diagnose_exception(exc: Exception, provider_name: str) -> Tuple[str, str]:
     if not isinstance(status, int):
         status = getattr(exc, "code", None)
     try:
-        status = int(status)  # grpc codes cũng cast được nếu là int
+        status = int(status)
     except (TypeError, ValueError):
         status = None
 
-    # --- API key sai / bị thu hồi ---
     if (
         status == 401
         or "api_key_invalid" in combined
@@ -165,7 +156,6 @@ def _diagnose_exception(exc: Exception, provider_name: str) -> Tuple[str, str]:
         or "unauthenticated" in combined
     ):
         reason = REASON_API_KEY_INVALID
-    # --- Thiếu quyền ---
     elif (
         status == 403
         or "permissiondenied" in combined
@@ -173,7 +163,6 @@ def _diagnose_exception(exc: Exception, provider_name: str) -> Tuple[str, str]:
         or "forbidden" in combined
     ):
         reason = REASON_PERMISSION_DENIED
-    # --- Hết quota / rate limit ---
     elif (
         status == 429
         or "resourceexhausted" in combined
@@ -182,10 +171,8 @@ def _diagnose_exception(exc: Exception, provider_name: str) -> Tuple[str, str]:
         or "too many requests" in combined
     ):
         reason = REASON_QUOTA_EXCEEDED
-    # --- Mạng / timeout ---
     elif _is_transient_error(exc) or "timeout" in combined or "connection" in combined:
         reason = REASON_NETWORK_TIMEOUT
-    # --- Parse/Validation đã cạn lần thử ---
     elif isinstance(exc, (ValueError, json.JSONDecodeError)):
         reason = REASON_OUTPUT_INVALID
     else:
@@ -200,12 +187,7 @@ def _diagnose_exception(exc: Exception, provider_name: str) -> Tuple[str, str]:
 
 
 def _build_failure_message(failures: list) -> str:
-    """Sinh message HTTP 502 rõ ràng, an toàn, hướng dẫn người dùng hành động.
-
-    ``failures`` là list tuple (provider, reason, hint, raw_masked_error).
-    Luôn kèm LỖI GỐC (đã mask bí mật) để hiển thị thông báo thật từ Google /
-    OpenAI thay vì chỉ thấy câu chung chung.
-    """
+    """Sinh message HTTP 502 rõ ràng, an toàn, hướng dẫn người dùng hành động."""
     lines = [
         "Không thể sinh nội dung bằng AI — tất cả LLM provider đều thất bại.",
     ]
@@ -222,37 +204,35 @@ def _build_failure_message(failures: list) -> str:
 
 
 # =============================================================================
-# FEW-SHOT EXAMPLES — DẠNG ABSTRACT (CHỈ DẠY CẤU TRÚC, CHỐNG CONTAMINATION)
+# FEW-SHOT EXAMPLES — DẠNG ABSTRACT (CÓ LAYOUT_TYPE ĐA DẠNG)
 # =============================================================================
-# Các ví dụ CHỈ minh hoạ CẤU TRÚC JSON, nội dung là placeholder [TRONG NGOẶC
-# VUÔNG] rõ ràng để LLM không copy (chống lỗi Few-Shot Contamination như vụ
-# "Hệ Mặt Trời" lặp lại cho mọi chủ đề).
 
 _FEW_SHOT_EXAMPLE_1 = json.dumps({
-    "topic": "[CHỦ ĐỀ CỦA NGƯỜ DÙNG — viết lại ngắn gọn]",
+    "topic": "[CHỦ ĐỀ CỦA NGƯỜI DÙNG — viết lại ngắn gọn]",
     "slides": [
         {
             "slide_number": 1,
-            "section": "[NHÃN MỤC viết hoa — bước 1 trong mạch kể của LĨNH VỰC đó]",
-            "slide_title": "[LUẬN ĐIỂM/KHẲNG ĐỊNH CỤ THỂ chứa thuật ngữ chuyên ngành + số liệu/mốc thời gian]",
+            "section": "[KHÁI NIỆM — bước 1 trong mạch kể]",
+            "slide_title": "[LUẬN ĐIỂM CỐT LÕI chứa thuật ngữ chuyên ngành + số liệu/mốc thời gian]",
+            "layout_type": "SPLIT_HERO",
             "cards": [
                 {
-                    "morph_id": "card_1",
-                    "title": "[KHẲNG ĐỊNH CỤ THỂ 1: thực thể + đại lượng/sự kiện THẬT của chủ đề]",
+                    "morph_id": "hero_card",
+                    "title": "[KHẲNG ĐỊNH CỐT LÕI HERO: thực thể + đại lượng/sự kiện THẬT]",
                     "description": "[2-4 câu diễn giải bằng GIỌNG CHUYÊN GIA của ngành: 3-4 thuật ngữ chuyên ngành + số liệu/đơn vị/ví dụ thật + quan hệ nhân quả. KHÔNG viết chung chung.]",
                     "color_theme": "#8B5CF6",
                     "order": 0,
                 },
                 {
-                    "morph_id": "card_2",
-                    "title": "[KHẲNG ĐỊNH CỤ THỂ 2: một chiều cạnh khác của chủ đề]",
+                    "morph_id": "sub_card_1",
+                    "title": "[CHIỀU CẠNH BỔ TRỢ 1: luận cứ hỗ trợ hero]",
                     "description": "[2-4 câu: thuật ngữ + dẫn chứng + ý nghĩa thực tiễn, đúng chuyên môn ngành.]",
                     "color_theme": "#10B981",
                     "order": 1,
                 },
                 {
-                    "morph_id": "card_3",
-                    "title": "[KHẲNG ĐỊNH CỤ THỂ 3: sự thật/đối sánh/số liệu đáng chú ý]",
+                    "morph_id": "sub_card_2",
+                    "title": "[CHIỀU CẠNH BỔ TRỢ 2: luận cứ tiếp theo]",
                     "description": "[2-4 câu: thuật ngữ + con số/mốc thời gian + vì sao nó quan trọng.]",
                     "color_theme": "#06B6D4",
                     "order": 2,
@@ -261,27 +241,28 @@ _FEW_SHOT_EXAMPLE_1 = json.dumps({
         },
         {
             "slide_number": 2,
-            "section": "[NHÃN MỤC viết hoa — bước 2 trong mạch kể]",
-            "slide_title": "[LUẬN ĐIỂM CỤ THỂ KẾ TIẾP — nối tiếp slide 1, không lặp lại]",
+            "section": "[KẾT QUẢ ĐỊNH LƯỢNG — bước 2 trong mạch kể]",
+            "slide_title": "[CÁC CHỈ SỐ VÀ ĐẠI LƯỢNG ĐO LƯỜNG NỔI BẬT]",
+            "layout_type": "STAT_GRID",
             "cards": [
                 {
-                    "morph_id": "card_1",
-                    "title": "[MỞ RỘNG KHẲNG ĐỊNH 1]",
-                    "description": "[2-4 câu: đào sâu cơ chế/nguyên nhân, kèm thuật ngữ và dữ kiện định lượng.]",
+                    "morph_id": "stat_card_1",
+                    "title": "[465 °C]",
+                    "description": "[Nhiệt độ bề mặt cực hạn do hiệu ứng nhà kính mất kiểm soát, cao hơn cả Thủy Tinh gần Mặt Trời hơn.]",
                     "color_theme": "#8B5CF6",
                     "order": 0,
                 },
                 {
-                    "morph_id": "card_2",
-                    "title": "[MỞ RỘNG KHẲNG ĐỊNH 2]",
-                    "description": "[2-4 câu: case study/ví dụ thật, kèm thuật ngữ và sự kiện cụ thể.]",
+                    "morph_id": "stat_card_2",
+                    "title": "[1.989×10³⁰ kg]",
+                    "description": "[Khối lượng Mặt Trời chiếm tới 99.86% tổng khối lượng toàn bộ hệ thống hành tinh.]",
                     "color_theme": "#10B981",
                     "order": 1,
                 },
                 {
-                    "morph_id": "card_3",
-                    "title": "[MỞ RỘNG KHẲNG ĐỊNH 3]",
-                    "description": "[2-4 câu: hệ quả/ý nghĩa, kèm thuật ngữ và quan hệ nhân quả.]",
+                    "morph_id": "stat_card_3",
+                    "title": "[88 ngày]",
+                    "description": "[Chu kỳ quỹ đạo elip siêu tốc của Thủy Tinh quanh Mặt Trời với vận tốc 47 km/s.]",
                     "color_theme": "#06B6D4",
                     "order": 2,
                 },
@@ -291,36 +272,37 @@ _FEW_SHOT_EXAMPLE_1 = json.dumps({
 }, ensure_ascii=False, indent=2)
 
 _FEW_SHOT_EXAMPLE_2 = json.dumps({
-    "topic": "[CHỦ ĐỀ KHÁC CỦA NGƯỜ DÙNG]",
+    "topic": "[CHỦ ĐỀ KHÁC CỦA NGƯỜI DÙNG]",
     "slides": [
         {
             "slide_number": 1,
-            "section": "[NHÃN MỤC viết hoa]",
-            "slide_title": "[LUẬN ĐIỂM CỤ THỂ dạng lộ trình/chu trình 4 bước]",
+            "section": "[LỘ TRÌNH THỰC THI]",
+            "slide_title": "[CHU TRÌNH 4 BƯỚC TIẾN TRÌNH THEO THỨ TỰ THỜI GIAN]",
+            "layout_type": "TIMELINE_STEPS",
             "cards": [
                 {
-                    "morph_id": "card_1",
+                    "morph_id": "step_1",
                     "title": "[GIAI ĐOẠN 1 — khẳng định cụ thể + mốc thời gian thật]",
                     "description": "[2-4 câu: bản chất giai đoạn, thuật ngữ chuyên ngành, sự kiện/số liệu minh chứng.]",
                     "color_theme": "#8B5CF6",
                     "order": 0,
                 },
                 {
-                    "morph_id": "card_2",
+                    "morph_id": "step_2",
                     "title": "[GIAI ĐOẠN 2 — khẳng định cụ thể + mốc thời gian thật]",
                     "description": "[2-4 câu: bản chất giai đoạn, thuật ngữ chuyên ngành, sự kiện/số liệu minh chứng.]",
                     "color_theme": "#10B981",
                     "order": 1,
                 },
                 {
-                    "morph_id": "card_3",
+                    "morph_id": "step_3",
                     "title": "[GIAI ĐOẠN 3 — khẳng định cụ thể + mốc thời gian thật]",
                     "description": "[2-4 câu: bản chất giai đoạn, thuật ngữ chuyên ngành, sự kiện/số liệu minh chứng.]",
                     "color_theme": "#06B6D4",
                     "order": 2,
                 },
                 {
-                    "morph_id": "card_4",
+                    "morph_id": "step_4",
                     "title": "[GIAI ĐOẠN 4 — khẳng định cụ thể + mốc thời gian thật]",
                     "description": "[2-4 câu: bản chất giai đoạn, thuật ngữ chuyên ngành, sự kiện/số liệu minh chứng.]",
                     "color_theme": "#EC4899",
@@ -333,10 +315,8 @@ _FEW_SHOT_EXAMPLE_2 = json.dumps({
 
 
 # =============================================================================
-# SYSTEM PROMPT (v5 — DYNAMIC PERSONA + DOMAIN VOCABULARY + STRICT BAN)
+# SYSTEM PROMPT (v6 — DYNAMIC PERSONA + DYNAMIC LAYOUT DIVERSITY)
 # =============================================================================
-# Ghi chú kỹ thuật: phần examples được gắn bằng .replace() ở cuối thay vì
-# f-string để tránh xung đột dấu ngoặc nhọn với cú pháp format của Python.
 
 SYSTEM_PROMPT_TEMPLATE = """Bạn là UNIVERSAL DOMAIN EXPERT — hệ thống AI chuyên sinh nội dung trình chiếu đạt chuẩn TED/Keynote. Trước khi viết BẤT KỲ CHỮ NÀO, bạn phải làm 2 việc: (1) nhận diện lĩnh vực của chủ đề, (2) NHẬP VAI chuyên gia hàng đầu lĩnh vực đó.
 
@@ -376,7 +356,7 @@ chứa thông tin gì (kèm mọi biến thể viết hoa/viết lại tương �
 - "Điểm nghẽn [chủ đề]", "Điểm nghẽn đang kìm hãm tiến độ"
 - "Cái giá của việc chần chừ"
 - "Các tổ chức chậm thích ứng đang tụt lại phía sau"
-CÁC NHÃN SÁO RỖNG: "Giớ thiệu chủ đề", "Điểm nổi bật", "Cấu trúc bài",
+CÁC NHÃN SÁO RỖNG: "Giới thiệu chủ đề", "Điểm nổi bật", "Cấu trúc bài",
 "Yếu tố cốt lõi", "Tổng quan", "Phân tích chuyên sâu", "Dữ liệu & Bằng chứng",
 "Giải pháp/Công nghệ", "Tác động chính", "Chỉ số đo lường", "Đặc điểm",
 "Thành phần", "Lộ trình triển khai", "Kết luận".
@@ -403,10 +383,10 @@ A. **MỖI TIÊU ĐỀ LÀ MỘT KHẲNG ĐỊNH CỤ THỂ**, không phải nh�
    - ĐÚNG: "Kim Tinh nóng 465 °C dù ở xa Mặt Trời hơn Thủy Tinh".
    - ĐÚNG: "Robusta chiếm ~90% diện tích cà phê Việt Nam".
    - SAI:  "Tổng quan hệ mặt trời". / "Nhu cầu cà phê đang tăng tốc".
-   - `title` dài 2-10 từ; chứa thực thể/thuật ngữ của chính chủ đề.
+   - `title` dài 1-10 từ; chứa thực thể/thuật ngữ hoặc con số của chính chủ đề.
 
-B. **THẺ GỒM 2 PHẦN**: `title` = khẳng định ngắn; `description` = đoạn diễn
-   giải 2-4 câu (20-60 từ) giải thích cơ chế, kèm thuật ngữ/số liệu/quan hệ
+B. **THẺ GỒM 2 PHẦN**: `title` = khẳng định ngắn hoặc con số; `description` = đoạn
+   diễn giải hoặc label súc tích giải thích cơ chế, kèm thuật ngữ/số liệu/quan hệ
    nhân quả như đã nêu ở BƯỚC 3.
 
 C. **MẠCH KỂ LINH HOẠT THEO LĨNH VỰC** — chọn mạch tự nhiên nhất:
@@ -425,16 +405,47 @@ C. **MẠCH KỂ LINH HOẠT THEO LĨNH VỰC** — chọn mạch tự nhiên nh
      (vd "CẤU TẠO", "CƠ CHẾ", "SƠ CHẾ", "DI SẢN"...), KHÔNG dùng nhãn sáo rỗng
      đã liệt kê trong STRICT BAN.
 
-D. **SỐ THẺ LINH HOẠT THEO Ý**: 1 thẻ (khẳng định lớn), 2 thẻ (đối chiếu hai
-   phía), 3 thẻ (3 khía cạnh), 4 thẻ (4 giai đoạn). Mỗi slide 1-4 thẻ, chọn số
-   thẻ TỰ NHIÊN nhất với ý đang trình bày.
-
 ══════════════════════════════════════════════════════════════════════
-BƯỚC 5 — CÁC QUY TẮC CẤU TRÚC JSON (STRUCTURAL RULES)
+BƯỚC 5 — QUY TẮC CHỌN BỐ CỤC ĐA DẠNG (DYNAMIC LAYOUT DIVERSITY)
 ══════════════════════════════════════════════════════════════════════
 
-1. **CHỈ NỘI DUNG, KHÔNG HÌNH HỌC**: KHÔNG trả `x/y/width/height` — Python tự
-   tính tọa độ. Bạn chỉ quyết định: `section`, `slide_title`, và mỗi card có
+BẮT BUỘC chọn trường `layout_type` phù hợp cho TỪNG SLIDE dựa vào bản chất nội dung:
+
+1. `SPLIT_HERO`:
+   - Dành cho: Slide định nghĩa, khái niệm cốt lõi, tuyên bố trọng tâm (hero highlight).
+   - Cấu trúc: Cột trái rộng chứa luận điểm chính (Hero point), cột phải xếp 2 thẻ phụ bổ trợ.
+   - Số thẻ: Thường gồm 3 thẻ (Card 0 = Hero, Card 1 & 2 = Thẻ phụ).
+
+2. `STAT_GRID`:
+   - Dành cho: Slide có số liệu, chỉ số KPI, kết quả đo lường, minh chứng định lượng.
+   - Cấu trúc: Nhấn mạnh số liệu (title là con số/đại lượng to nổi bật như '465 °C', '+35%', '1.989×10³⁰ kg', '90%') + description là label ngắn/giải thích ý nghĩa.
+   - Số thẻ: 2-4 thẻ số liệu.
+
+3. `TIMELINE_STEPS`:
+   - Dành cho: Slide quy trình, tiến trình, lộ trình, chuỗi các bước thực hiện theo thứ tự thời gian.
+   - Cấu trúc: Tiến trình 3-4 bước theo chiều ngang có vòng tròn số thứ tự và đường nối.
+   - Số thẻ: 3-4 thẻ.
+
+4. `CARDS_ROW`:
+   - Dành cho: Slide liệt kê 2-3 yếu tố ngang hàng, so sánh các chiều cạnh.
+   - Cấu trúc: 2-3 thẻ nằm ngang cân đối.
+   - Số thẻ: 2-3 thẻ.
+
+5. `GRID_2X2`:
+   - Dành cho: Slide phân loại 4 nhóm yếu tố, ma trận 4 góc cân đối, 4 trụ cột.
+   - Cấu trúc: Đúng 4 thẻ chia đều thành lưới 2 hàng x 2 cột.
+   - Số thẻ: 4 thẻ.
+
+⚠️ ĐIỀU KIỆN TIÊN QUYẾT BẮT BUỘC (CRITICAL DIVERSITY RULE):
+- Trong cùng một bài thuyết trình, TUYỆT ĐỐI KHÔNG ĐƯỢC để 2 slide liên tiếp có cùng một `layout_type`.
+- Phải luân chuyển linh hoạt giữa các layout để tạo trải nghiệm thị giác đa dạng, hấp dẫn người xem (ví dụ: Slide 1: SPLIT_HERO → Slide 2: STAT_GRID → Slide 3: TIMELINE_STEPS → Slide 4: GRID_2X2 → Slide 5: CARDS_ROW).
+
+══════════════════════════════════════════════════════════════════════
+BƯỚC 6 — CÁC QUY TẮC CẤU TRÚC JSON (STRUCTURAL RULES)
+══════════════════════════════════════════════════════════════════════
+
+1. **CHỈ NỘI DUNG & LAYOUT_TYPE, KHÔNG HÌNH HỌC**: KHÔNG trả `x/y/width/height` — Python tự
+   tính tọa độ. Bạn chỉ quyết định: `section`, `slide_title`, `layout_type`, và mỗi card có
    `morph_id`, `title`, `description`, `color_theme`, `order`.
 2. **MORPH_ID**: ngắn, chữ thường gạch dưới, không dấu/khoảng trắng (vd
    "hero_card", "orbit_card", "card_1"). GIỮ NGUYÊN morph_id giữa slide N và
@@ -457,12 +468,12 @@ BƯỚC 5 — CÁC QUY TẮC CẤU TRÚC JSON (STRUCTURAL RULES)
 KHÔNG SAO CHÉP; PHẢI THAY BẰNG NỘI DUNG THẬT VỀ USER TOPIC]
 ══════════════════════════════════════════════════════════════════════
 
-VÍ DỤ 1 — 2 slide, 3 thẻ/slide, morph_id giữ nguyên cho cùng đối tượng:
+VÍ DỤ 1 — 2 slide, phối hợp SPLIT_HERO và STAT_GRID, morph_id giữ nguyên:
 
 __EXAMPLE_1__
 
 ---
-VÍ DỤ 2 — 1 slide dạng chu trình/lộ trình 4 giai đoạn (4 thẻ):
+VÍ DỤ 2 — 1 slide dạng tiến trình TIMELINE_STEPS (4 thẻ):
 
 __EXAMPLE_2__
 
@@ -470,8 +481,8 @@ __EXAMPLE_2__
 HÃY BẮT ĐẦU
 ══════════════════════════════════════════════════════════════════════
 Đọc kỹ "=== USER TOPIC TO GENERATE ===", NHẬP VAI chuyên gia đúng lĩnh vực,
-viết nội dung 100% bám sát chủ đề bằng từ vựng chuyên ngành thật, theo đúng
-cấu trúc JSON đã minh hoạ.
+chọn layout_type đa dạng giữa các slide theo đúng quy tắc, viết nội dung 100%
+bám sát chủ đề bằng từ vựng chuyên ngành thật, theo đúng cấu trúc JSON đã minh hoạ.
 """
 
 SYSTEM_PROMPT = (
@@ -607,11 +618,7 @@ def _get_openai_client() -> Any:
 
 
 def _build_user_prompt(req: GenerateRequest) -> str:
-    """Xây dựng user prompt — đặt chủ đề giữa 2 DELIMITER độc đáo.
-
-    Delimiter rõ ràng giúp LLM không nhầm lẫn đâu là yêu cầu thật, đâu là
-    system instruction, và log audit kiểm tra prompt có bị trôi hay không.
-    """
+    """Xây dựng user prompt — đặt chủ đề giữa 2 DELIMITER độc đáo."""
     lang = "Tiếng Việt" if (req.language or "vi").lower().startswith("vi") else "English"
 
     logger.info(
@@ -632,7 +639,11 @@ def _build_user_prompt(req: GenerateRequest) -> str:
         f"- Phong cách thiết kế: {req.style}\n"
         f"- Tỉ lệ khung hình: {req.aspect_ratio}\n"
         f"- Ngôn ngữ nội dung (toàn bộ title/description dùng ngôn ngữ này): {lang}\n"
-        f"- Sinh speaker notes: {'Có' if req.include_speaker_notes else 'Không'}\n\n"
+        f"- Sinh speaker notes: {'Có' if req.include_speaker_notes else 'Không'}\n"
+        "- BẮT BUỘC CHỌN layout_type ĐA DẠNG CHO TỪNG SLIDE: SPLIT_HERO (định nghĩa/khái niệm), "
+        "STAT_GRID (số liệu/kết quả), TIMELINE_STEPS (quy trình/bước), CARDS_ROW hoặc "
+        "GRID_2X2 (liệt kê/ma trận).\n"
+        "- ĐIỀU KIỆN BẮT BUỘC: KHÔNG ĐƯỢC để 2 slide liên tiếp có cùng một layout_type.\n\n"
         "NHẮC LẠI TRỰC TIẾP: Trước hết NHẬP VAI chuyên gia đúng lĩnh vực của "
         "chủ đề trên; mọi nội dung (topic, slide_title, title, description) phải "
         "BÁM SÁT 100% chủ đề đó với từ vựng chuyên ngành thật; tuyệt đối không "
@@ -666,8 +677,7 @@ def _validate_llm_output(data: dict) -> LLMOutput:
         raise ValueError("Pydantic Validation Error:\n" + "\n".join(errors[:5])) from exc
 
 
-# Các cụm văn mẫu B2B rác/phần placeholder bị cấm — dùng để reject nội dung
-# (và đưa vào retry feedback) nếu LLM vẫn vi phạm STRICT BAN.
+# Các cụm văn mẫu B2B rác/phần placeholder bị cấm
 _BANNED_TEMPLATE_TOKENS = [
     "nhu cầu", "đang tăng tốc", "đang gia tăng", "điểm nghẽn", "kìm hãm",
     "cái giá của việc chần chừ", "cái giá chần chừ", "ưu tiên số 1",
@@ -681,11 +691,7 @@ _PLACEHOLDER_TOKENS = [
 
 
 def _content_smell_check(result: LLMOutput, original_prompt: str) -> list:
-    """Quét nhanh dấu hiệu nội dung rác; trả về danh sách vi phạm (rỗng = sạch).
-
-    Kết quả được dùng để (a) log cảnh báo và (b) đưa vào feedback retry nếu
-    vi phạm STRICT BAN — LLM sẽ bị yêu cầu viết lại thay vì âm thầm chấp nhận.
-    """
+    """Quét nhanh dấu hiệu nội dung rác; trả về danh sách vi phạm (rỗng = sạch)."""
     combined = (result.topic or "").lower()
     for s in result.slides:
         combined += " " + (s.section or "").lower() + " " + (s.slide_title or "").lower()
@@ -703,7 +709,6 @@ def _content_smell_check(result: LLMOutput, original_prompt: str) -> list:
             banned_hits,
         )
     else:
-        # Kiểm tra nhẹ topic có chia sẻ từ khóa với user prompt (phát hiện lệch chủ đề)
         prompt_tokens = {w for w in original_prompt.lower().split() if len(w) >= 3}
         topic_tokens = {w for w in (result.topic or "").lower().split() if len(w) >= 3}
         if prompt_tokens and topic_tokens and not (prompt_tokens & topic_tokens):
@@ -724,11 +729,7 @@ async def _parse_with_retry(
     req: GenerateRequest,
     provider: str,
 ) -> LLMOutput:
-    """Gọi LLM → trích JSON → validate Pydantic → reject nội dung vi phạm.
-
-    Mỗi lần thử lại dùng temperature khác nhau (xem TEMPERATURE_LADDER) và kèm
-    feedback lỗi cụ thể vào prompt lần sau. Chỉ raise khi cạn toàn bộ lần thử.
-    """
+    """Gọi LLM → trích JSON → validate Pydantic → reject nội dung vi phạm."""
     last_error: Optional[str] = None
 
     for attempt in range(1, MAX_VALIDATION_RETRIES + 2):
@@ -740,13 +741,13 @@ async def _parse_with_retry(
                 user_prompt_text
                 + f"\n\n=== LỖI LẦN TRƯỚC (HÃY SỬA) ===\n{last_error}\n\n"
                 + "Hãy trả về JSON ĐÃ SỬA: nhập vai chuyên gia đúng lĩnh vực, dùng "
-                + "từ vựng chuyên ngành thật, không dùng văn mẫu bị cấm, đúng schema, "
-                + "không giải thích."
+                + "từ vựng chuyên ngành thật, chọn layout_type đa dạng giữa các slide "
+                + "(không để 2 slide liên tiếp cùng layout_type), không dùng văn mẫu "
+                + "bị cấm, đúng schema, không giải thích."
             )
 
         messages = build_messages(user_prompt_text)
 
-        # --- Gọi LLM (lỗi API ném thẳng ra → xử lý/phân loại ở entry point) ---
         raw_text = await raw_text_getter(messages, temperature)
 
         # --- Parse JSON ---
@@ -786,7 +787,7 @@ async def _parse_with_retry(
             await asyncio.sleep(LLM_RETRY_BASE_DELAY_S * attempt)
             continue
 
-        # --- STRICT BAN smell check: vi phạm cũng bị coi là thất bại mềm ---
+        # --- STRICT BAN smell check ---
         violations = _content_smell_check(result, req.prompt)
         if violations and attempt <= MAX_VALIDATION_RETRIES:
             last_error = (
@@ -815,6 +816,18 @@ async def _parse_with_retry(
 # PROVIDER IMPLEMENTATIONS
 # =============================================================================
 
+def _make_schema_strict_for_openai(node: Any) -> None:
+    """Đảm bảo mọi object trong JSON Schema đều có 'required' chứa toàn bộ properties (yêu cầu OpenAI strict: True)."""
+    if isinstance(node, dict):
+        if node.get("type") == "object" and "properties" in node:
+            node["required"] = list(node["properties"].keys())
+        for v in node.values():
+            _make_schema_strict_for_openai(v)
+    elif isinstance(node, list):
+        for item in node:
+            _make_schema_strict_for_openai(item)
+
+
 async def _generate_with_openai(req: GenerateRequest) -> LLMOutput:
     """Gọi OpenAI JSON-schema structured output, temperature theo thang retry."""
     if not settings.OPENAI_API_KEY or not settings.OPENAI_API_KEY.strip():
@@ -831,6 +844,7 @@ async def _generate_with_openai(req: GenerateRequest) -> LLMOutput:
     client = _get_openai_client()
     json_schema = LLMOutput.model_json_schema()
     json_schema.pop("title", None)
+    _make_schema_strict_for_openai(json_schema)
 
     def _messages(user_content: str) -> list:
         return [
@@ -841,7 +855,6 @@ async def _generate_with_openai(req: GenerateRequest) -> LLMOutput:
     async def _raw_getter(messages: list, temperature: float) -> str:
         async def _call():
             try:
-                # Đường ưu tiên: strict structured output (gpt-4o trở lên)
                 return await client.chat.completions.create(
                     model=settings.OPENAI_MODEL,
                     messages=messages,
@@ -856,7 +869,6 @@ async def _generate_with_openai(req: GenerateRequest) -> LLMOutput:
                     temperature=temperature,
                 )
             except Exception:  # noqa: BLE001
-                # Model cũ không hỗ trợ json_schema → rơi về json_object
                 return await client.chat.completions.create(
                     model=settings.OPENAI_MODEL,
                     messages=messages,
@@ -872,7 +884,6 @@ async def _generate_with_openai(req: GenerateRequest) -> LLMOutput:
 async def _generate_with_gemini(req: GenerateRequest) -> LLMOutput:
     """Gọi Google Gemini với response_schema, temperature theo thang retry."""
     if not settings.GEMINI_API_KEY or not settings.GEMINI_API_KEY.strip():
-        # Không để SDK nổ với lỗi khó hiểu khi key rỗng/khoảng trắng.
         raise LLMConfigurationError(
             "GEMINI_API_KEY đang trống hoặc chỉ gồm khoảng trắng — kiểm tra biến "
             "môi trường của Backend (Render Env Vars / file .env)."
@@ -890,13 +901,7 @@ async def _generate_with_gemini(req: GenerateRequest) -> LLMOutput:
     gemini_schema = _gemini_response_schema()
 
     def _build_model(temperature: float, use_schema: bool = True):
-        """Dựng model theo temperature của lần retry (object nhẹ, chỉ giữ config).
-
-        Trả về (model, system_instruction_ok) — SDK quá cũ (<0.5) không có
-        tham số system_instruction thì bam False để nhồi prompt vào user message.
-        """
         generation_config = {
-            # BẮT BUỘC: ép Gemini trả về JSON chuẩn (yêu cầu debug #3).
             "response_mime_type": "application/json",
             "temperature": temperature,
         }
@@ -937,7 +942,6 @@ async def _generate_with_gemini(req: GenerateRequest) -> LLMOutput:
         except ValueError as exc:
             if "Unknown field for Schema" not in str(exc):
                 raise
-            # SDK vẫn lằng nhằng với schema → gọi lại CHỈ với JSON mime-type.
             logger.warning(
                 "Gemini SDK từ chối response_schema (%s) — thử lại chỉ với "
                 "response_mime_type=application/json.",
@@ -953,7 +957,6 @@ async def _generate_with_gemini(req: GenerateRequest) -> LLMOutput:
         try:
             return getattr(resp, "text", None)
         except (ValueError, AttributeError) as exc:
-            # Gemini chặn nội dung (safety) hoặc rỗng → coi như output invalid
             raise ValueError(
                 f"Gemini không trả về text hợp lệ (bị chặn hoặc rỗng): {exc}"
             ) from exc
@@ -968,13 +971,8 @@ _PROVIDER_FUNCS = {
 
 
 # =============================================================================
-# GEMINI SCHEMA SANITIZER — FIX "Unknown field for Schema: maxLength"
+# GEMINI SCHEMA SANITIZER
 # =============================================================================
-# google-generativeai (đặc biệt bản 0.4-0.5) KHÔNG chấp nhận JSON Schema đầy đủ
-# của Pydantic: mọi field như minLength/maxLength/pattern/$ref/$defs/maxItems/
-# default/title... đều khiến SDK raise "Unknown field for Schema: ..." NGAY KHI
-# gọi API — và đây chính là nguồn gốc khiến toàn bộ request Gemini thất bại ngay
-# từ nhịp đầu. Schema gửi lên Google chỉ được giữ các trường proto hợp lệ.
 
 _GEMINI_PROTO_SCHEMA_KEYS = {
     "type", "format", "description", "nullable", "enum",
@@ -988,7 +986,7 @@ _GEMINI_TYPE_NAME_MAP = {
 
 
 def _resolve_json_refs(node: Any, defs: dict) -> Any:
-    """Duỗi phẳng các tham chiếu {"$ref": "#/$defs/X"} (Gemini proto không hiểu $ref)."""
+    """Duỗi phẳng các tham chiếu {"$ref": "#/$defs/X"}."""
     if isinstance(node, dict):
         if "$ref" in node:
             ref_name = str(node["$ref"]).split("/")[-1]
@@ -1007,20 +1005,13 @@ def _resolve_json_refs(node: Any, defs: dict) -> Any:
 
 
 def _sanitize_for_gemini(node: Any) -> Any:
-    """Loại bỏ mọi trường JSON-Schema mà Gemini proto Schema không hỗ trợ.
-
-    Giữ lại: type/format/description/nullable/enum/items/properties/required
-    (đủ để model hiểu cấu trúc), đồng thờ chuẩn hóa tên kiểu sang dạng proto
-    (object → OBJECT, string → STRING...).
-    """
+    """Loại bỏ mọi trường JSON-Schema mà Gemini proto Schema không hỗ trợ."""
     if isinstance(node, dict):
         sanitized: dict = {}
         for key, value in node.items():
             if key == "type" and isinstance(value, str):
                 sanitized["type"] = _GEMINI_TYPE_NAME_MAP.get(value.lower(), value.upper())
             elif key == "description" and isinstance(value, str):
-                # Claude/LLM đọc description để hiểu ràng buộc → giữ ngắn gọn ở ngoài,
-                # bản thân ràng buộc cứng (minLength...) do Pydantic phía server kiểm.
                 sanitized["description"] = value[:1000]
             elif key in ("nullable", "format"):
                 sanitized[key] = value
@@ -1034,7 +1025,6 @@ def _sanitize_for_gemini(node: Any) -> Any:
                 }
             elif key == "required" and isinstance(value, list):
                 sanitized["required"] = [str(v) for v in value]
-        # Google yêu cầu properties phải đi kèm kiểu OBJECT
         if "properties" in sanitized and "type" not in sanitized:
             sanitized["type"] = "OBJECT"
         if "items" in sanitized and "type" not in sanitized:
@@ -1076,8 +1066,6 @@ def _provider_ready(provider: str) -> bool:
     return False
 
 
-# Model Gemini được Google AI Studio hỗ trợ rộng rãi (tham khảo khi cấu hình).
-# Không khóa cứng vì Google liên tục ra model mới — chỉ cảnh báo khi sai pattern.
 _KNOWN_GEMINI_PREFIXES = ("gemini-", "tunedModels/", "models/gemini-")
 
 
@@ -1103,14 +1091,7 @@ def _check_gemini_model_name() -> None:
 # =============================================================================
 
 async def generate_presentation_with_llm(req: GenerateRequest) -> PresentationResponse:
-    """Gọi LLM → LLMOutput → Layout Engine → PresentationResponse.
-
-    ⚠️ THAY ĐỔI HÀNH VI QUAN TRỌNG (v5):
-      - Thành công: 100% nội dung do LLM (OpenAI/Gemini) sáng tạo.
-      - Thất bại:   raise :class:`LLMGenerationError` /
-                    :class:`LLMConfigurationError` với chẩn đoán rõ ràng.
-                    KHÔNG CÒN silent fallback sang văn mẫu B2B ghép chuỗi.
-    """
+    """Gọi LLM → LLMOutput → Layout Engine → PresentationResponse."""
     provider = (settings.LLM_PROVIDER or "openai").lower()
 
     logger.info(
@@ -1118,7 +1099,6 @@ async def generate_presentation_with_llm(req: GenerateRequest) -> PresentationRe
         req.prompt[:200], req.num_slides, req.style, req.language, provider,
     )
 
-    # "mock" đã bị loại bỏ ở v5 — mock chính là nguồn sinh văn mẫu rác.
     if provider == "mock":
         raise LLMConfigurationError(
             "LLM_PROVIDER='mock' không còn được hỗ trợ: ExoticMorph chỉ sinh nội "
@@ -1147,8 +1127,6 @@ async def generate_presentation_with_llm(req: GenerateRequest) -> PresentationRe
         try:
             raw_output: LLMOutput = await _PROVIDER_FUNCS[name](req)
         except Exception as exc:  # noqa: BLE001
-            # ⚠️ QUY TẮC BẮT BUỘC: in FULL TRACEBACK ra console để lập trình viên
-            # thấy chính xác lỗi gốc từ SDK (không được "nuốt" lỗi im lặng).
             logger.exception(
                 "Provider '%s' thất bại với exception %s: %s",
                 name, type(exc).__name__, _summarize_exc(exc, limit=500),
@@ -1164,7 +1142,6 @@ async def generate_presentation_with_llm(req: GenerateRequest) -> PresentationRe
         )
         return presentation
 
-    # Tất cả provider đều thất bại → FAIL LOUD, không văn mẫu dự phòng.
     final_message = _build_failure_message(failures)
     logger.error(
         "TẤT CẢ LLM PROVIDER ĐỀU THẤT BẠI — trả HTTP 502 cho client.\n%s",

@@ -225,6 +225,18 @@ export async function generatePresentationPreview(
       .filter((e) => e.type === "text" || e.type === "heading")
       .map((c) => (c.label ? `[${c.label}] ${c.content}` : c.content));
 
+    const rawLayout = s.layout_type?.toUpperCase() || "";
+    const slideLayoutType: SlideItem["layoutType"] =
+      idx === 0
+        ? "title-hero"
+        : rawLayout === "STAT_GRID" || metrics.length > 0
+        ? "metrics-grid"
+        : rawLayout === "TIMELINE_STEPS"
+        ? "timeline-step"
+        : rawLayout === "CARDS_ROW" || rawLayout === "COMPARE"
+        ? "cards-compare"
+        : "split-feature";
+
     return {
       id: idx + 1,
       slideNumber: s.slide_number,
@@ -235,7 +247,7 @@ export async function generatePresentationPreview(
       cards: cards.length > 0 ? cards : undefined,
       bulletPoints: bulletPoints.length > 0 ? bulletPoints : undefined,
       metrics: metrics.length > 0 ? metrics : undefined,
-      layoutType: idx === 0 ? "title-hero" : metrics.length > 0 ? "metrics-grid" : "split-feature",
+      layoutType: slideLayoutType,
       morphDescription:
         s.morph_description ||
         `Tự động nội suy các hình khối có cùng Morph ID sang Slide ${idx + 1}`,
