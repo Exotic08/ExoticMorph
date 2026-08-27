@@ -221,11 +221,20 @@ export const SlidePreview: React.FC<SlidePreviewProps> = ({
       ? `${Math.max(1, ptToPx(CARD_BORDER_PT))}px solid ${hexToRgba(elem.border_color, 0.55)}`
       : undefined;
 
+    // QUAN TRỌNG: chỉ gán layoutId khi backend thật sự đánh dấu đây là
+    // morph-anchor có chủ đích (`morph_id` tồn tại). Nếu fallback về `elem.id`
+    // (chỉ số cục bộ trong 1 slide, lặp lại 1,2,3... ở mọi slide), Framer Motion
+    // sẽ coi 2 shape KHÔNG liên quan ở 2 slide khác nhau là "cùng một object"
+    // và tự động nội suy (FLIP animate) giữa vị trí/kích thước/nội dung của
+    // chúng khi đổi slide -> gây hiệu ứng "chữ đè chữ, nhoè" trong lúc chuyển
+    // slide hoặc khi demo Morph tự chạy (setInterval 3.5s).
+    const morphLayoutId = elem.morph_id ? `morph-${elem.morph_id}` : undefined;
+
     if (elem.type === "accent" || elem.type === "connector") {
       return (
         <motion.div
           key={`${elem.id}-${idx}`}
-          layoutId={`morph-${elem.morph_id || elem.id}`}
+          layoutId={morphLayoutId}
           className="pointer-events-none"
           style={{
             ...baseStyle,
@@ -240,7 +249,7 @@ export const SlidePreview: React.FC<SlidePreviewProps> = ({
       return (
         <motion.div
           key={`${elem.id}-${idx}`}
-          layoutId={`morph-${elem.morph_id || elem.id}`}
+          layoutId={morphLayoutId}
           initial={{ opacity: 0, scale: 0.96 }}
           animate={{ opacity: 1, scale: 1 }}
           transition={{ duration: 0.28 }}
@@ -268,7 +277,7 @@ export const SlidePreview: React.FC<SlidePreviewProps> = ({
       return (
         <motion.div
           key={`${elem.id}-${idx}`}
-          layoutId={`morph-${elem.morph_id || elem.id}`}
+          layoutId={morphLayoutId}
           initial={{ opacity: 0, y: 4 }}
           animate={{ opacity: 1, y: 0 }}
           transition={{ duration: 0.3 }}
@@ -312,7 +321,7 @@ export const SlidePreview: React.FC<SlidePreviewProps> = ({
       return (
         <motion.div
           key={`${elem.id}-${idx}`}
-          layoutId={`morph-${elem.morph_id || elem.id}`}
+          layoutId={morphLayoutId}
           initial={{ opacity: 0, scale: 0.985 }}
           animate={{ opacity: 1, scale: 1 }}
           transition={{ duration: 0.34, delay: Math.min(idx * 0.015, 0.12) }}
