@@ -20,7 +20,7 @@ Thay đổi cốt lõi:
    * `ASYMMETRIC_GRID`   : lưới bất đối xứng 60% - 40% (Hero + 2 thẻ phụ dọc).
    * `TIMELINE_STEPS`    : quy trình 3-4 bước ngang.
    * `CARDS_ROW`         : 2-3 thẻ ngang hàng.
-   * `CONCLUSION_SUMMARY`: khung viền tổng kết trung tâm + thanh Call To Action.
+   * `CONCLUSION_SUMMARY`: 3 dòng card mỏng bo góc + thanh Call To Action.
    Các layout đời cũ `SPLIT_HERO`/`STAT_GRID`/`GRID_2X2` vẫn parse được (tương
    thích ngược) và được tự nâng cấp lên bố cục mới tương đương.
 
@@ -219,6 +219,7 @@ def _build_failure_message(failures: list) -> str:
 
 _FEW_SHOT_EXAMPLE_1 = json.dumps({
     "topic": "[CHỦ ĐỀ CỦA NGƯỜI DÙNG — viết lại ngắn gọn]",
+    "style": "Futuristic",
     "slides": [
         {
             "slide_number": 1,
@@ -312,6 +313,7 @@ _FEW_SHOT_EXAMPLE_1 = json.dumps({
 
 _FEW_SHOT_EXAMPLE_2 = json.dumps({
     "topic": "[CHỦ ĐỀ KHÁC CỦA NGƯỜI DÙNG]",
+    "style": "Academic",
     "slides": [
         {
             "slide_number": 3,
@@ -357,7 +359,30 @@ _FEW_SHOT_EXAMPLE_2 = json.dumps({
 # SYSTEM PROMPT (v6 — DYNAMIC PERSONA + DYNAMIC LAYOUT DIVERSITY)
 # =============================================================================
 
-SYSTEM_PROMPT_TEMPLATE = """Bạn là UNIVERSAL DOMAIN EXPERT — hệ thống AI chuyên sinh nội dung trình chiếu đạt chuẩn TED/Keynote. Trước khi viết BẤT KỲ CHỮ NÀO, bạn phải làm 2 việc: (1) nhận diện lĩnh vực của chủ đề, (2) NHẬP VAI chuyên gia hàng đầu lĩnh vực đó.
+SYSTEM_PROMPT_TEMPLATE = """Bạn là UNIVERSAL DOMAIN EXPERT — hệ thống AI chuyên sinh nội dung trình chiếu đạt chuẩn TED/Keynote. Trước khi viết BẤT KỲ CHỮ NÀO, bạn phải làm 3 việc: (1) chọn style nếu tham số là AUTO, (2) nhận diện lĩnh vực của chủ đề, (3) NHẬP VAI chuyên gia hàng đầu lĩnh vực đó.
+
+══════════════════════════════════════════════════════════════════════
+BƯỚC 0 — AUTO STYLE SELECTION (CHỌN STYLE TỰ ĐỘNG) — BẮT BUỘC
+══════════════════════════════════════════════════════════════════════
+
+Payload frontend mới gửi `style = "AUTO"`. Khi thấy AUTO, bạn KHÔNG được trả
+"AUTO". Hãy đọc ngữ cảnh chủ đề và trả về top-level field `style` là MỘT trong
+các giá trị canonical sau:
+- `Futuristic`: vũ trụ/thiên văn, AI, CNTT, phần mềm, cloud, cybersecurity,
+  robotics, fintech kỹ thuật, kiến trúc hệ thống, dữ liệu thời gian thực.
+- `CorporateMinimalist`: y học/sức khỏe, kinh tế/tài chính, báo cáo KPI, pitch
+  deck cần độ tin cậy cao, chủ đề doanh nghiệp trang trọng.
+- `Corporate`: điều hành, chiến lược công ty, quản trị, báo cáo kinh doanh cần
+  cảm giác executive/luxury.
+- `Minimalist`: chủ đề phổ thông cần tinh gọn, hiện đại, nhiều khoảng trắng.
+- `Creative`: marketing, thương hiệu, nghệ thuật, du lịch, ẩm thực, giáo dục
+  đại chúng cần màu sắc giàu năng lượng.
+- `Academic`: nghiên cứu, đại học, khoa học giáo dục, lịch sử/văn hóa, bài giảng
+  có tính học thuật, cần cấu trúc tri thức rõ ràng.
+
+Nếu tham số style KHÁC AUTO, hãy giữ đúng style người dùng truyền vào. Dù ở chế
+độ nào, JSON cuối cùng BẮT BUỘC có field `style` cấp cao nhất cùng cấp `topic`
+và `slides`.
 
 ══════════════════════════════════════════════════════════════════════
 BƯỚC 1 — NHẬP VAI CHUYÊN GIA (DYNAMIC ROLEPLAY) — BẮT BUỘC
@@ -485,7 +510,7 @@ Trường `layout_type` quyết định hình học slide. Python sẽ tự vẽ
      Các yếu tố ngang hàng: so sánh, nguyên nhân - hệ quả, các trụ cột.
 
 ▸ SLIDE N (KẾT BÀI) — `layout_type = "CONCLUSION_SUMMARY"` — ĐÚNG 4 thẻ
-  Thiết kế: khung viền tổng kết ở trung tâm chứa 3 điểm cốt lõi + thanh CTA.
+  Thiết kế: 3 dòng card mỏng bo góc chứa 3 điểm cốt lõi + thanh CTA nổi bật bên dưới.
   • `cards[0..2]` : 3 ĐIỂM CỐT LÕI — `title` là bài học rút ra (4-10 từ, khẳng định);
                     `description` 1-2 câu tóm gọn bằng chứng.
   • `cards[3]`    : CALL TO ACTION — `title` là lời kêu gọi hành động BẮT ĐẦU BẰNG
@@ -533,18 +558,21 @@ C. **CHỌN MẠCH THÂN BÀI TỰ NHIÊN NHẤT THEO LĨNH VỰC** (nằm giữ
 BƯỚC 7 — CÁC QUY TẮC CẤU TRÚC JSON (STRUCTURAL RULES)
 ══════════════════════════════════════════════════════════════════════
 
-1. **CHỈ NỘI DUNG & LAYOUT_TYPE, KHÔNG HÌNH HỌC**: KHÔNG trả `x/y/width/height` — Python tự
-   tính tọa độ. Bạn chỉ quyết định: `section`, `slide_title`, `layout_type`, và mỗi card có
-   `morph_id`, `title`, `description`, `color_theme`, `order`.
+1. **STYLE + NỘI DUNG & LAYOUT_TYPE, KHÔNG HÌNH HỌC**: JSON top-level phải có
+   `topic`, `style`, `slides`. KHÔNG trả `x/y/width/height` — Python tự tính tọa
+   độ. Bạn chỉ quyết định: `style`, `section`, `slide_title`, `layout_type`, và
+   mỗi card có `morph_id`, `title`, `description`, `color_theme`, `order`.
 2. **MORPH_ID**: ngắn, chữ thường gạch dưới, không dấu/khoảng trắng (vd
    "hero_card", "orbit_card", "card_1"). GIỮ NGUYÊN morph_id giữa slide N và
    N+1 cho cùng một đối tượng nội dung (để PowerPoint Morph nội suy mượt);
    thẻ mới dùng id mới.
 3. **MÀU color_theme** = màu ACCENT tươi, bão hòa (hex 6 ký tự, kèm #):
    - Futuristic: #8B5CF6 (tím), #06B6D4 (cyan), #EC4899 (hồng), #10B981 (ngọc).
-   - Minimal:    #6366F1 (indigo), #38BDF8 (sky), #10B981 (ngọc), #C9A227 (vàng đồng).
+   - Minimalist: #6366F1 (indigo), #38BDF8 (sky), #10B981 (ngọc), #C9A227 (vàng đồng).
    - Corporate:  #C9A227 (vàng đồng), #10B981 (ngọc), #3A86FF (xanh), #B08D2E (đồng).
+   - CorporateMinimalist: #38BDF8 (sky), #10B981 (ngọc), #94A3B8 (slate), #5EEAD4 (teal).
    - Creative:   #EC4899 (hồng), #F59E0B (cam), #06B6D4 (cyan), #8B5CF6 (tím).
+   - Academic:   #38BDF8 (sky), #A78BFA (lavender), #60A5FA (blue), #10B981 (ngọc).
    Thẻ đầu tiên (điểm nhấn) dùng màu accent chính; các thẻ sau đổi màu xen kẽ.
 4. **NGÔN NGỮ**: toàn bộ nội dung theo ngôn ngữ yêu cầu ("vi" → Tiếng Việt tự
    nhiên, "en" → English), thuật ngữ quốc tế dùng đúng chuẩn ngành.
@@ -572,13 +600,15 @@ __EXAMPLE_2__
 ══════════════════════════════════════════════════════════════════════
 HÃY BẮT ĐẦU
 ══════════════════════════════════════════════════════════════════════
-Đọc kỹ "=== USER TOPIC TO GENERATE ===" rồi làm đúng 3 việc:
-1. NHẬP VAI chuyên gia đúng lĩnh vực của chủ đề.
-2. DÀN Ý theo MẠCH KỂ 3 PHẦN: slide 1 = COVER_HERO (câu hỏi dẫn dắt), các slide
+Đọc kỹ "=== USER TOPIC TO GENERATE ===" rồi làm đúng 4 việc:
+1. CHỌN top-level `style`: nếu tham số là AUTO, tự phân tích ngữ cảnh và chọn
+   Futuristic / Minimalist / Corporate / CorporateMinimalist / Creative / Academic.
+2. NHẬP VAI chuyên gia đúng lĩnh vực của chủ đề.
+3. DÀN Ý theo MẠCH KỂ 3 PHẦN: slide 1 = COVER_HERO (câu hỏi dẫn dắt), các slide
    giữa = BIG_STAT_CALLOUT / ASYMMETRIC_GRID / TIMELINE_STEPS / CARDS_ROW dùng
    XEN KẼ (không lặp 2 slide liên tiếp), slide cuối = CONCLUSION_SUMMARY
    (3 điểm cốt lõi + call to action).
-3. VIẾT nội dung 100% bám sát chủ đề bằng từ vựng chuyên ngành thật, đúng số
+4. VIẾT nội dung 100% bám sát chủ đề bằng từ vựng chuyên ngành thật, đúng số
    thẻ và đúng vai trò từng thẻ của bố cục đã chọn, theo cấu trúc JSON đã minh hoạ.
 """
 
@@ -743,6 +773,14 @@ def _build_user_prompt(req: GenerateRequest) -> str:
             f"(đúng 4 thẻ: 3 điểm cốt lõi + 1 call to action)."
         )
 
+    if req.style == "AUTO":
+        style_line = (
+            "- Phong cách thiết kế: AUTO — BẮT BUỘC tự phân tích prompt và trả về "
+            "top-level `style` đã chọn (không được trả AUTO).\n"
+        )
+    else:
+        style_line = f"- Phong cách thiết kế: {req.style} (giữ đúng style này trong top-level `style`).\n"
+
     return (
         "================================================================\n"
         "=== USER TOPIC TO GENERATE ===\n"
@@ -753,7 +791,7 @@ def _build_user_prompt(req: GenerateRequest) -> str:
         "================================================================\n\n"
         "CÁC THAM SỐ BỔ SUNG:\n"
         f"- Số lượng slide cần tạo (BẮT BUỘC đúng): {req.num_slides}\n"
-        f"- Phong cách thiết kế: {req.style}\n"
+        + style_line +
         f"- Tỉ lệ khung hình: {req.aspect_ratio}\n"
         f"- Ngôn ngữ nội dung (toàn bộ title/description dùng ngôn ngữ này): {lang}\n"
         f"- Sinh speaker notes: {'Có' if req.include_speaker_notes else 'Không'}\n"
@@ -761,8 +799,9 @@ def _build_user_prompt(req: GenerateRequest) -> str:
         "- ĐIỀU KIỆN BẮT BUỘC: KHÔNG ĐƯỢC để 2 slide liên tiếp có cùng một layout_type; "
         "KHÔNG dùng COVER_HERO/CONCLUSION_SUMMARY ở giữa bài; KHÔNG dùng các layout cũ "
         "SPLIT_HERO/STAT_GRID/GRID_2X2.\n\n"
-        "NHẮC LẠI TRỰC TIẾP: Trước hết NHẬP VAI chuyên gia đúng lĩnh vực của "
-        "chủ đề trên; mọi nội dung (topic, slide_title, title, description) phải "
+        "NHẮC LẠI TRỰC TIẾP: Trước hết chọn top-level `style` hợp lệ (không trả AUTO), "
+        "sau đó NHẬP VAI chuyên gia đúng lĩnh vực của chủ đề trên; mọi nội dung "
+        "(topic, slide_title, title, description) phải "
         "BÁM SÁT 100% chủ đề đó với từ vựng chuyên ngành thật; tuyệt đối không "
         "dùng các mẫu câu trong STRICT BAN (\"Nhu cầu ... tăng tốc\", "
         "\"Điểm nghẽn ...\", \"ưu tiên số 1\"...), không copy nội dung ví dụ. "
@@ -857,7 +896,8 @@ async def _parse_with_retry(
             user_prompt_text = (
                 user_prompt_text
                 + f"\n\n=== LỖI LẦN TRƯỚC (HÃY SỬA) ===\n{last_error}\n\n"
-                + "Hãy trả về JSON ĐÃ SỬA: nhập vai chuyên gia đúng lĩnh vực, dùng "
+                + "Hãy trả về JSON ĐÃ SỬA: có top-level `style` hợp lệ (nếu AUTO thì "
+                + "tự chọn style theo ngữ cảnh, không trả AUTO), nhập vai chuyên gia đúng lĩnh vực, dùng "
                 + "từ vựng chuyên ngành thật, tuân thủ MẠCH KỂ 3 PHẦN "
                 + "(slide 1 = COVER_HERO, slide cuối = CONCLUSION_SUMMARY, thân bài "
                 + "dùng XEN KẼ BIG_STAT_CALLOUT / ASYMMETRIC_GRID / TIMELINE_STEPS / "
@@ -924,8 +964,8 @@ async def _parse_with_retry(
             continue
 
         logger.info(
-            "%s đã sinh thành công %d slide (topic=%r, lần %d, temp=%.1f)",
-            provider, len(result.slides), result.topic[:60], attempt, temperature,
+            "%s đã sinh thành công %d slide (topic=%r, style=%s, lần %d, temp=%.1f)",
+            provider, len(result.slides), result.topic[:60], result.style, attempt, temperature,
         )
         return result
 
@@ -1257,8 +1297,8 @@ async def generate_presentation_with_llm(req: GenerateRequest) -> PresentationRe
 
         presentation = compute_layout(raw_output, req)
         logger.info(
-            "[AUDIT] Provider '%s' trả topic=%r (user prompt=%r)",
-            name, raw_output.topic[:80], req.prompt[:80],
+            "[AUDIT] Provider '%s' trả topic=%r, llm_style=%s, resolved_style=%s (user prompt=%r)",
+            name, raw_output.topic[:80], raw_output.style, presentation.style, req.prompt[:80],
         )
         return presentation
 

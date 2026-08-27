@@ -6,13 +6,11 @@ import {
   Sparkles, 
   LayoutList, 
   Ratio, 
-  Palette, 
   RotateCcw,
   SlidersHorizontal,
-  ChevronDown,
   Info
 } from "lucide-react";
-import { PromptFormData, SlideCountOption, AspectRatioOption, SlideStyleOption } from "@/types";
+import { PromptFormData, SlideCountOption, AspectRatioOption } from "@/types";
 
 interface PromptInputProps {
   formData: PromptFormData;
@@ -41,9 +39,6 @@ export const PromptInput: React.FC<PromptInputProps> = ({
     onChange({ ...formData, aspectRatio: ratio });
   };
 
-  const handleStyleChange = (style: SlideStyleOption) => {
-    onChange({ ...formData, style });
-  };
 
   const handleClear = () => {
     onChange({
@@ -111,7 +106,7 @@ export const PromptInput: React.FC<PromptInputProps> = ({
         </div>
 
         {/* Selectors Bar */}
-        <div className="mt-5 grid grid-cols-1 sm:grid-cols-3 gap-3">
+        <div className="mt-5 grid grid-cols-1 sm:grid-cols-2 gap-3">
           {/* Slide Count Selector */}
           <div className="flex flex-col gap-1.5">
             <div className="flex items-center gap-1.5 text-xs font-medium text-slate-300">
@@ -168,27 +163,9 @@ export const PromptInput: React.FC<PromptInputProps> = ({
             </div>
           </div>
 
-          {/* Style Selector */}
-          <div className="flex flex-col gap-1.5">
-            <div className="flex items-center gap-1.5 text-xs font-medium text-slate-300">
-              <Palette className="w-3.5 h-3.5 text-pink-400" />
-              <span>Phong cách đồ họa</span>
-            </div>
-            <div className="relative">
-              <select
-                aria-label="Phong cách đồ họa"
-                disabled={isLoading}
-                value={formData.style}
-                onChange={(e) => handleStyleChange(e.target.value as SlideStyleOption)}
-                className="w-full appearance-none px-3.5 py-2 rounded-xl bg-black/40 border border-white/[0.06] text-xs font-medium text-slate-200 focus:outline-none focus:border-pink-500/50 cursor-pointer"
-              >
-                <option value="Futuristic" className="bg-[#12141C] text-slate-200">🚀 Futuristic (Neon & Cyber Dark)</option>
-                <option value="Minimal" className="bg-[#12141C] text-slate-200">✨ Minimal (Tinh gọn & Hiện đại)</option>
-                <option value="Corporate" className="bg-[#12141C] text-slate-200">💼 Corporate (Doanh nghiệp & Đẳng cấp)</option>
-                <option value="Creative" className="bg-[#12141C] text-slate-200">🎨 Creative (Vibrant & Phá cách)</option>
-              </select>
-              <ChevronDown className="w-4 h-4 text-slate-400 absolute right-3 top-1/2 -translate-y-1/2 pointer-events-none" />
-            </div>
+          <div className="sm:col-span-2 rounded-xl bg-white/[0.025] border border-white/[0.06] px-3.5 py-2.5 text-xs text-slate-400 flex items-start gap-2">
+            <Sparkles className="w-3.5 h-3.5 text-pink-400 mt-0.5 shrink-0" />
+            <span>AI tự phân tích prompt và chọn phong cách phù hợp nhất (Futuristic, Minimalist, Corporate/CorporateMinimalist, Creative hoặc Academic) khi gửi payload <code className="text-slate-300 font-mono">style: AUTO</code>.</span>
           </div>
         </div>
 

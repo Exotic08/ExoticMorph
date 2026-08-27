@@ -156,7 +156,8 @@ def create_demo_morph_presentation(
   shape1.fill.solid()
   shape1.fill.fore_color.rgb = MorphPresentationBuilder.COLOR_GREEN_START
   shape1.line.color.rgb = RGBColor(52, 211, 153)  # Viền xanh sáng
-  shape1.line.width = Pt(1.5)
+  # Viền mảnh đồng bộ với generator_service (0.75pt), tránh cảm giác khối dày.
+  shape1.line.width = Pt(0.75)
 
   # Cấu hình nội dung Text
   tf1 = shape1.text_frame
@@ -226,7 +227,8 @@ def create_demo_morph_presentation(
   shape2.fill.solid()
   shape2.fill.fore_color.rgb = MorphPresentationBuilder.COLOR_ORANGE_END
   shape2.line.color.rgb = RGBColor(251, 146, 60)  # Viền cam sáng
-  shape2.line.width = Pt(2.0)
+  # Viền mảnh đồng bộ với generator_service (0.75pt), tránh cảm giác khối dày.
+  shape2.line.width = Pt(0.75)
 
   # Cấu hình nội dung Text
   tf2 = shape2.text_frame

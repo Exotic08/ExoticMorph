@@ -112,6 +112,19 @@ class NoFallbackContractTests(unittest.TestCase):
         self.assertIn("=== END OF USER TOPIC ===", text)
         self.assertIn("giải thích hệ mặt trời", text)
 
+    def test_user_prompt_explains_auto_style_contract(self) -> None:
+        req = GenerateRequest(prompt="báo cáo y học về vaccine mRNA", num_slides=3, style="AUTO")
+        text = llm_service._build_user_prompt(req)
+        self.assertIn("Phong cách thiết kế: AUTO", text)
+        self.assertIn("top-level `style`", text)
+        self.assertIn("không được trả AUTO", text)
+
+    def test_llm_output_rejects_auto_as_resolved_style(self) -> None:
+        payload = _valid_payload()
+        payload["style"] = "AUTO"
+        with self.assertRaises(Exception):
+            LLMOutput.model_validate(payload)
+
 
 class TemperatureLadderTests(unittest.TestCase):
     def test_ladder_values(self) -> None:

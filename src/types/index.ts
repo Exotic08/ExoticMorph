@@ -4,7 +4,15 @@
 
 export type SlideCountOption = 3 | 5 | 10;
 export type AspectRatioOption = "16:9" | "4:3";
-export type SlideStyleOption = "Minimal" | "Futuristic" | "Corporate" | "Creative";
+export type SlideStyleOption =
+  | "Minimalist"
+  | "Minimal" // backward-compatible value accepted from older payloads
+  | "Futuristic"
+  | "Corporate"
+  | "CorporateMinimalist"
+  | "Creative"
+  | "Academic";
+export type PromptStyleOption = SlideStyleOption | "AUTO";
 
 /**
  * Shape của JSON trả về TRỰC TIẾP từ FastAPI Backend (giữ nguyên snake_case).
@@ -100,7 +108,7 @@ export interface PromptFormData {
   topic: string;
   slideCount: SlideCountOption;
   aspectRatio: AspectRatioOption;
-  style: SlideStyleOption;
+  style: PromptStyleOption;
   includeSpeakerNotes?: boolean;
 }
 
@@ -150,6 +158,10 @@ export interface SlideItem {
   metrics?: MetricItem[];
   tags?: string[];
   speakerNotes?: string;
+  /** Backend elements with exact percentage geometry used by PPTX builder. */
+  elements?: BackendSlideElement[];
+  bgColor?: string | null;
+  backendLayoutType?: string;
 }
 
 /**
@@ -197,5 +209,4 @@ export interface QuickPrompt {
   description: string;
   promptText: string;
   recommendedCount: SlideCountOption;
-  recommendedStyle: SlideStyleOption;
 }

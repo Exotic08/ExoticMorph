@@ -8,7 +8,7 @@ Covers the v7 upgrade:
   slide 1 = COVER_HERO, slide N = CONCLUSION_SUMMARY, body slides alternate
   through BODY_LAYOUTS and never repeat the previous slide's layout.
 - Geometry contract for each new layout (font sizes, 60/40 split, centred
-  summary frame, nothing outside the 16:9 canvas, no overlapping cards).
+  three thin summary rows, nothing outside the 16:9 canvas, no overlapping cards).
 - The Pydantic schema still round-trips to JSON (frontend preview contract) and
   the few-shot examples embedded in the system prompt are schema-valid.
 """
@@ -456,26 +456,22 @@ class CoverHeroSlideTests(unittest.TestCase):
 # ==============================================================================
 
 class BigStatCalloutTests(unittest.TestCase):
-    def test_number_font_is_at_least_72pt_for_typical_stats(self) -> None:
-        for value in ("92 bar", "465 °C", "+35%", "90%", "88 ngày", "2.2%"):
-            self.assertGreaterEqual(_stat_number_font_size(value), 72, value)
-        self.assertEqual(_stat_number_font_size("92"), 96)
+    def test_number_font_is_capped_to_prevent_wrapping(self) -> None:
+        for value in ("92 bar", "465 °C", "+35%", "90%", "99.86%", "2.2%"):
+            size = _stat_number_font_size(value)
+            self.assertGreaterEqual(size, 56, value)
+            self.assertLessEqual(size, 64, value)
+        self.assertEqual(_stat_number_font_size("92"), 64)
 
-    def test_long_number_shrinks_and_still_fits_its_box(self) -> None:
-        """Chuỗi dài được hạ cỡ chữ và wrap gọn trong khối số (cao 3.95")."""
+    def test_long_number_shrinks_but_stays_readable(self) -> None:
+        """Chuỗi dài được hạ cỡ chữ; PPTX builder sẽ đặt word_wrap=False."""
         box_w = 5.21
-        inner_w = box_w - 0.55
         short_size = _stat_number_font_size("92 bar", box_w)
         for value in ("1.989×10³⁰ kg", "Tỷ lệ chuyển đổi của khách hàng doanh nghiệp"):
             size = _stat_number_font_size(value, box_w)
-            self.assertGreaterEqual(size, 28)
+            self.assertGreaterEqual(size, 40)
             self.assertLess(size, short_size)
-            lines = le._estimate_text_lines(value, size, inner_w)
-            self.assertLessEqual(
-                lines * size * 1.22 / 72.0,
-                le.CARDS_H_IN,
-                f"{value!r} tràn khối số",
-            )
+            self.assertLessEqual(size, 64)
 
 
     def test_stat_box_left_and_explanations_right(self) -> None:
@@ -501,7 +497,8 @@ class BigStatCalloutTests(unittest.TestCase):
         self.assertEqual(slide.layout_type, LayoutType.BIG_STAT_CALLOUT)
         cards = _elems(slide, "card")
         self.assertEqual(len(cards), 2)
-        self.assertGreaterEqual(cards[0].font_size, 72)
+        self.assertGreaterEqual(cards[0].font_size, 56)
+        self.assertLessEqual(cards[0].font_size, 64)
         self.assertEqual(cards[0].content, "92 bar")
         self.assertLessEqual(cards[1].font_size, 20)
         self.assertGreater(cards[1].x, cards[0].x + cards[0].width)
@@ -567,24 +564,25 @@ class ConclusionSummaryTests(unittest.TestCase):
                 self.assertGreaterEqual(ry, fy)
                 self.assertLessEqual(ry + rh, fy + fh + 1e-6, f"n={n}")
 
-    def test_cta_sits_below_frame_and_above_footer(self) -> None:
+    def test_cta_sits_below_three_thin_rows_and_above_footer(self) -> None:
         slide = _compute(_arc_payload()).slides[4]
         self.assertEqual(slide.layout_type, LayoutType.CONCLUSION_SUMMARY)
 
-        frame = next(e for e in slide.elements if e.morph_id == "summary_frame")
-        self.assertEqual(frame.type, "shape")
-        self.assertTrue(frame.border_color)
+        self.assertIsNone(next((e for e in slide.elements if e.morph_id == "summary_frame"), None))
 
         takeaways = [e for e in slide.elements if (e.morph_id or "").startswith("card_")
                      and e.type == "card" and e.step is not None]
         self.assertEqual(len(takeaways), 3)
         for row in takeaways:
-            self.assertGreaterEqual(row.y, frame.y)
-            self.assertLessEqual(row.y + row.height, frame.y + frame.height + 1e-6)
+            self.assertLessEqual(row.height, le.SUM_ROW_MAX_H_IN * 100 / SLIDE_H + 1e-6)
+            self.assertTrue(row.border_color)
+        for upper, lower in zip(takeaways, takeaways[1:]):
+            self.assertGreater(lower.y, upper.y + upper.height)
 
         cta = next(e for e in slide.elements if e.morph_id == "call_to_action")
         self.assertEqual(cta.type, "card")
-        self.assertGreater(cta.y, frame.y + frame.height)
+        self.assertGreater(cta.y, takeaways[-1].y + takeaways[-1].height)
+        self.assertAlmostEqual(cta.height, le.SUM_CTA_H_IN * 100 / SLIDE_H, places=2)
         self.assertLessEqual(cta.y + cta.height, le.FOOTER_TOP_IN * 100 / SLIDE_H + 1e-6)
         self.assertIn("Theo dõi", cta.content)
 
@@ -596,6 +594,27 @@ class ConclusionSummaryTests(unittest.TestCase):
         self.assertIsNone(next((e for e in slide.elements if e.morph_id == "call_to_action"), None))
         self.assertEqual(len(_elems(slide, "card")), 3)
 
+
+
+
+# ==============================================================================
+# 5b. AUTO STYLE RESOLUTION
+# ==============================================================================
+
+class AutoStyleResolutionTests(unittest.TestCase):
+    def test_generate_request_accepts_auto_and_legacy_minimal_alias(self) -> None:
+        self.assertEqual(GenerateRequest(prompt="báo cáo y học", style="AUTO").style, "AUTO")
+        self.assertEqual(GenerateRequest(prompt="deck gọn", style="Minimal").style, "Minimalist")
+
+    def test_auto_uses_llm_top_level_style_when_present(self) -> None:
+        payload = _arc_payload()
+        payload["style"] = "Academic"
+        pres = _compute(payload, style="AUTO")
+        self.assertEqual(pres.style, "Academic")
+
+    def test_auto_falls_back_to_prompt_context_when_llm_style_missing(self) -> None:
+        pres = _compute(_arc_payload(), style="AUTO")
+        self.assertEqual(pres.style, "Futuristic")
 
 # ==============================================================================
 # 6. END-TO-END CONTRACT (schema ↔ frontend preview ↔ PPTX)
@@ -640,7 +659,7 @@ class PresentationContractTests(unittest.TestCase):
         PresentationResponse.model_validate(dumped)
 
     def test_every_style_builds_without_geometry_error(self) -> None:
-        for style in ("Futuristic", "Minimal", "Corporate", "Creative"):
+        for style in ("Futuristic", "Minimal", "Minimalist", "Corporate", "CorporateMinimalist", "Creative", "Academic"):
             pres = _compute(_arc_payload(), style=style)
             self.assertEqual(pres.slides[0].layout_type, LayoutType.COVER_HERO)
             self.assertEqual(pres.slides[-1].layout_type, LayoutType.CONCLUSION_SUMMARY)
@@ -675,6 +694,7 @@ class PresentationContractTests(unittest.TestCase):
 class SystemPromptArcTests(unittest.TestCase):
     def test_prompt_mandates_the_three_part_arc(self) -> None:
         for needle in (
+            "AUTO STYLE SELECTION", "top-level `style`",
             "MỞ BÀI", "THÂN BÀI", "KẾT BÀI",
             "CẤU TRÚC 3 PHẦN BẮT BUỘC",
             'layout_type BẮT BUỘC = "COVER_HERO"',
