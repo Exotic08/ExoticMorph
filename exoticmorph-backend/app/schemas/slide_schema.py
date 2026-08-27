@@ -328,6 +328,74 @@ class SlideData(BaseModel):
 RawSlideContent = SlideData
 
 
+
+# Style được tách thành 2 lớp:
+# - RequestStyleType: payload người dùng có thể gửi "AUTO" để LLM tự chọn.
+# - StyleType: style đã resolve dùng cho PresentationResponse / PPTX / Preview.
+StyleType = Literal[
+    "Futuristic",
+    "Minimalist",
+    "Corporate",
+    "CorporateMinimalist",
+    "Creative",
+    "Academic",
+]
+RequestStyleType = Literal[
+    "AUTO",
+    "Futuristic",
+    "Minimalist",
+    "Corporate",
+    "CorporateMinimalist",
+    "Creative",
+    "Academic",
+]
+
+_STYLE_ALIAS_MAP = {
+    "AUTO": "AUTO",
+    "AUTOMATIC": "AUTO",
+    "AI": "AUTO",
+    "FUTURISTIC": "Futuristic",
+    "FUTURE": "Futuristic",
+    "CYBER": "Futuristic",
+    "NEON": "Futuristic",
+    "MINIMAL": "Minimalist",
+    "MINIMALIST": "Minimalist",
+    "MINIMALISM": "Minimalist",
+    "CORPORATE": "Corporate",
+    "BUSINESS": "Corporate",
+    "EXECUTIVE": "Corporate",
+    "CORPORATE_MINIMALIST": "CorporateMinimalist",
+    "CORPORATEMINIMALIST": "CorporateMinimalist",
+    "CORPORATE_MINIMAL": "CorporateMinimalist",
+    "MEDICAL": "CorporateMinimalist",
+    "HEALTHCARE": "CorporateMinimalist",
+    "CREATIVE": "Creative",
+    "VIBRANT": "Creative",
+    "ACADEMIC": "Academic",
+    "EDUCATION": "Academic",
+    "RESEARCH": "Academic",
+}
+
+
+def _coerce_style_type(value: Any, *, allow_auto: bool = False) -> str:
+    """Chuẩn hóa style về tên canonical, giữ tương thích alias đời cũ.
+
+    Frontend mới luôn gửi ``AUTO``; LLM phải trả một style đã resolve. Các payload
+    cũ dùng ``Minimal`` vẫn được nhận và nâng cấp thành ``Minimalist``.
+    """
+    if isinstance(value, str):
+        clean = value.strip().replace("-", "_").replace(" ", "_")
+        upper = clean.upper()
+        mapped = _STYLE_ALIAS_MAP.get(upper)
+        if mapped == "AUTO" and not allow_auto:
+            return "Futuristic"
+        if mapped:
+            return mapped
+    if allow_auto:
+        return "AUTO"
+    return "Futuristic"
+
+
 class LLMOutput(BaseModel):
     """Định dạng JSON DUY NHẤT mà LLM được phép trả về.
 
@@ -343,12 +411,33 @@ class LLMOutput(BaseModel):
         max_length=300,
         description="Chủ đề tổng thể của bài trình chiếu",
     )
+    style: StyleType = Field(
+        default="Futuristic",
+        description=(
+            "Phong cách thiết kế đã được LLM lựa chọn. Khi request style='AUTO', "
+            "trường này BẮT BUỘC là một trong: Futuristic, Minimalist, Corporate, "
+            "CorporateMinimalist, Creative, Academic."
+        ),
+    )
     slides: List[SlideData] = Field(
         ...,
         min_length=1,
         max_length=30,
         description="Danh sách các slide (đúng số lượng người dùng yêu cầu)",
     )
+
+    @field_validator("style", mode="before")
+    @classmethod
+    def parse_style(cls, value: Any) -> str:
+        if isinstance(value, str):
+            clean = value.strip().replace("-", "_").replace(" ", "_").upper()
+            mapped = _STYLE_ALIAS_MAP.get(clean)
+            if mapped == "AUTO":
+                raise ValueError("LLMOutput.style phải là style đã chọn, không được là AUTO")
+            if mapped:
+                return mapped
+            raise ValueError("LLMOutput.style không thuộc danh sách style hợp lệ")
+        return _coerce_style_type(value, allow_auto=False)
 
 
 # ==============================================================================
@@ -361,7 +450,6 @@ SlideElementType = Literal[
     "kicker", "footer", "connector", "accent",
 ]
 AspectRatioType = Literal["16:9", "4:3"]
-StyleType = Literal["Futuristic", "Minimal", "Corporate", "Creative"]
 
 MAX_ELEMENTS_PER_SLIDE = 40
 MAX_SLIDES_PER_PRESENTATION = 30
@@ -425,6 +513,11 @@ class PresentationResponse(BaseModel):
     slides: List[Slide] = Field(min_length=1, max_length=MAX_SLIDES_PER_PRESENTATION)
     morph_strategy: Optional[str] = Field(default=None)
 
+    @field_validator("style", mode="before")
+    @classmethod
+    def parse_style(cls, value: Any) -> str:
+        return _coerce_style_type(value, allow_auto=False)
+
 
 # ==============================================================================
 # 3. API REQUEST SCHEMA — Payload từ client
@@ -443,9 +536,13 @@ class GenerateRequest(BaseModel):
         default=5, ge=1, le=20,
         description="Số lượng slide mong muốn (thường là 3, 5, 10)",
     )
-    style: StyleType = Field(
-        default="Futuristic",
-        description="Phong cách thiết kế: 'Futuristic' | 'Minimal' | 'Corporate' | 'Creative'",
+    style: RequestStyleType = Field(
+        default="AUTO",
+        description=(
+            "Phong cách thiết kế. Frontend mặc định gửi 'AUTO' để LLM tự phân tích "
+            "prompt và trả về style đã chọn; vẫn chấp nhận giá trị cũ: Futuristic, "
+            "Minimalist/Minimal, Corporate, CorporateMinimalist, Creative, Academic."
+        ),
     )
     aspect_ratio: AspectRatioType = Field(default="16:9")
     language: str = Field(
@@ -453,3 +550,8 @@ class GenerateRequest(BaseModel):
         description="Ngôn ngữ nội dung: 'vi' hoặc 'en'",
     )
     include_speaker_notes: bool = Field(default=True)
+
+    @field_validator("style", mode="before")
+    @classmethod
+    def parse_request_style(cls, value: Any) -> str:
+        return _coerce_style_type(value, allow_auto=True)

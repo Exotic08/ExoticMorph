@@ -13,7 +13,7 @@ MẠCH KỂ 3 PHẦN (Narrative Arc):
            3. ASYMMETRIC_GRID  : Lưới bất đối xứng 60% - 40% (thẻ Hero + 2 thẻ phụ dọc).
            4. TIMELINE_STEPS   : Tiến trình 3-4 bước ngang (số thứ tự + đường nối).
            5. CARDS_ROW        : 2-3 thẻ nằm ngang cân đối.
-  KẾT     6. CONCLUSION_SUMMARY: Khung viền tổng kết ở trung tâm (3 điểm cốt lõi)
+  KẾT     6. CONCLUSION_SUMMARY: 3 dòng card mỏng bo góc (3 điểm cốt lõi)
                                  + thanh Call To Action bên dưới.
 
 QUY TẮC BẮT BUỘC (được Layout Engine TỰ ĐỘNG thực thi, kể cả khi LLM làm sai):
@@ -25,6 +25,7 @@ QUY TẮC BẮT BUỘC (được Layout Engine TỰ ĐỘNG thực thi, kể c�
 """
 
 import logging
+import re
 from typing import Any, Dict, List, Tuple, Optional
 
 from app.schemas.slide_schema import (
@@ -42,6 +43,7 @@ from app.schemas.slide_schema import (
     SlideElement,
     StyleType,
     LayoutType,
+    _coerce_style_type,
 )
 
 logger = logging.getLogger("exoticmorph.layout")
@@ -68,8 +70,8 @@ TITLE_TOP_IN  = 1.26
 TITLE_H_IN    = 0.74
 
 # --- Vùng nội dung thẻ chính (cards) ---
-CARDS_TOP_IN = 2.58
-CARDS_H_IN   = 3.95
+CARDS_TOP_IN = 2.48
+CARDS_H_IN   = 3.70
 
 # --- Vùng footer (bộ nhận diện cố định) ---
 FOOTER_TOP_IN = 6.84
@@ -78,8 +80,8 @@ FOOTER_H_IN   = 0.28
 # --- Tiến trình / Lộ trình (TIMELINE_STEPS): vòng tròn số thứ tự phía trên thẻ ---
 STEP_TOP_IN           = 2.04
 STEP_D_IN             = 0.46
-TIMELINE_CARDS_TOP_IN = 2.68
-TIMELINE_CARDS_H_IN   = 3.85
+TIMELINE_CARDS_TOP_IN = 2.56
+TIMELINE_CARDS_H_IN   = 3.25
 
 # Khoảng cách giữa các thẻ (gap) — inches
 GAP_IN   = 0.40
@@ -114,18 +116,18 @@ COVER_BADGE_PT     = 11
 COVER_MAX_TITLE_LINES = 3   # Không để tiêu đề cover tràn quá 3 dòng
 
 # ==============================================================================
-# HẰNG SỐ BỐ CỤC KẾT BÀI — CONCLUSION_SUMMARY (khung viền tổng kết ở trung tâm)
+# HẰNG SỐ BỐ CỤC KẾT BÀI — CONCLUSION_SUMMARY (3 card mỏng + CTA)
 # ==============================================================================
-SUM_FRAME_TOP_IN   = 2.52
-SUM_FRAME_BOT_IN   = 5.62
-SUM_FRAME_PAD_X_IN = 0.34
-SUM_FRAME_PAD_Y_IN = 0.30
+SUM_FRAME_TOP_IN   = 2.42
+SUM_FRAME_BOT_IN   = 5.10
+SUM_FRAME_PAD_X_IN = 0.42
+SUM_FRAME_PAD_Y_IN = 0.00
 SUM_ROW_GAP_IN     = 0.16
-SUM_ROW_MAX_H_IN   = 0.92
-SUM_CTA_TOP_IN     = 5.90
-SUM_CTA_H_IN       = 0.62
-SUM_ROW_TITLE_PT   = 17
-SUM_CTA_PT         = 18
+SUM_ROW_MAX_H_IN   = 0.72
+SUM_CTA_TOP_IN     = 5.56
+SUM_CTA_H_IN       = 0.80
+SUM_ROW_TITLE_PT   = 14
+SUM_CTA_PT         = 17
 
 
 # ==============================================================================
@@ -167,7 +169,7 @@ STYLE_PALETTES = {
         "kicker":        "#8B5CF6",   # tím thẫm
         "footer":        "#5B6472",
     },
-    "Minimal": {
+    "Minimalist": {
         "bg":            "#0E1319",
         "card_fallback": "#182028",
         "card_hero":     "#1E2A33",
@@ -195,6 +197,34 @@ STYLE_PALETTES = {
         "kicker":        "#C9A227",
         "footer":        "#5B6A85",
     },
+    "CorporateMinimalist": {
+        "bg":            "#0B1220",
+        "card_fallback": "#111827",
+        "card_hero":     "#172033",
+        "card_border":   "#2B3548",
+        "text":          "#F8FAFC",
+        "sub_text":      "#AAB6C8",
+        "badge":         "#0F766E",
+        "badge_text":    "#FFFFFF",
+        "accent":        "#38BDF8",
+        "accent2":       "#10B981",
+        "kicker":        "#5EEAD4",
+        "footer":        "#64748B",
+    },
+    "Academic": {
+        "bg":            "#0D1117",
+        "card_fallback": "#151B23",
+        "card_hero":     "#1B2430",
+        "card_border":   "#303A46",
+        "text":          "#F4F7FA",
+        "sub_text":      "#A7B3C2",
+        "badge":         "#2563EB",
+        "badge_text":    "#FFFFFF",
+        "accent":        "#38BDF8",
+        "accent2":       "#A78BFA",
+        "kicker":        "#93C5FD",
+        "footer":        "#657386",
+    },
     "Creative": {
         "bg":            "#120A1A",
         "card_fallback": "#1F1430",
@@ -213,18 +243,93 @@ STYLE_PALETTES = {
 
 CARD_ACCENTS = {
     "Futuristic": ["#8B5CF6", "#10B981", "#06B6D4", "#EC4899"],
-    "Minimal":    ["#10B981", "#38BDF8", "#C9A227", "#6366F1"],
+    "Minimalist": ["#10B981", "#38BDF8", "#C9A227", "#6366F1"],
     "Corporate":  ["#C9A227", "#10B981", "#3A86FF", "#B08D2E"],
+    "CorporateMinimalist": ["#38BDF8", "#10B981", "#94A3B8", "#5EEAD4"],
     "Creative":   ["#EC4899", "#F59E0B", "#06B6D4", "#8B5CF6"],
+    "Academic":   ["#38BDF8", "#A78BFA", "#60A5FA", "#10B981"],
 }
 
 
+# Alias palette để các payload cũ dùng "Minimal" vẫn render đúng style mới.
+STYLE_PALETTES["Minimal"] = STYLE_PALETTES["Minimalist"]
+CARD_ACCENTS["Minimal"] = CARD_ACCENTS["Minimalist"]
+
+
+def _infer_style_from_prompt(prompt: str) -> StyleType:
+    """Heuristic an toàn khi request ``AUTO`` nhưng LLM/provider cũ chưa trả style.
+
+    LLM vẫn là nguồn quyết định chính. Hàm này chỉ đảm bảo backend không bao giờ
+    trả ``AUTO`` về frontend/PPTX, đồng thời unit test không phụ thuộc provider.
+    """
+    text = (prompt or "").lower()
+    futuristic = (
+        "ai", "trí tuệ nhân tạo", "công nghệ", "software", "phần mềm",
+        "cloud", "microservice", "kubernetes", "fintech", "vũ trụ",
+        "thiên văn", "hệ mặt trời", "mặt trời", "hành tinh", "space", "cosmos",
+        "robot", "blockchain", "cyber",
+    )
+    corporate_min = (
+        "y học", "sức khỏe", "bệnh", "lâm sàng", "clinical", "medical",
+        "healthcare", "kinh tế", "tài chính", "finance", "báo cáo",
+        "doanh thu", "thị trường", "kpi", "roi", "startup", "pitch",
+    )
+    academic = (
+        "nghiên cứu", "học thuật", "đại học", "giáo dục", "đào tạo",
+        "luận văn", "thí nghiệm", "research", "academic", "education",
+        "history", "lịch sử", "văn hóa",
+    )
+    creative = (
+        "sáng tạo", "marketing", "thương hiệu", "brand", "campaign",
+        "nghệ thuật", "art", "design", "âm nhạc", "du lịch", "ẩm thực",
+    )
+
+    def has_any(keywords: Tuple[str, ...]) -> bool:
+        for kw in keywords:
+            if len(kw) <= 2 and kw.isascii():
+                if re.search(rf"(?<![\w]){re.escape(kw)}(?![\w])", text):
+                    return True
+            elif kw in text:
+                return True
+        return False
+
+    if has_any(futuristic):
+        return "Futuristic"
+    if has_any(corporate_min):
+        return "CorporateMinimalist"
+    if has_any(academic):
+        return "Academic"
+    if has_any(creative):
+        return "Creative"
+    return "Minimalist"
+
+
+def _resolve_effective_style(raw: LLMOutput, req: GenerateRequest) -> StyleType:
+    """Quyết định style cuối cùng cho layout/PPTX.
+
+    - Nếu client gửi style cụ thể (không phải AUTO), giữ style đó để tương thích API cũ.
+    - Nếu client gửi AUTO, ưu tiên top-level ``raw.style`` do LLM trả.
+    - Nếu output cũ không có ``style``, fallback heuristic theo prompt để không rò ``AUTO``.
+    """
+    requested = getattr(req, "style", "AUTO")
+    if requested != "AUTO":
+        return _coerce_style_type(requested, allow_auto=False)  # type: ignore[return-value]
+
+    fields_set = getattr(raw, "model_fields_set", set())
+    if "style" in fields_set and getattr(raw, "style", None):
+        return _coerce_style_type(raw.style, allow_auto=False)  # type: ignore[return-value]
+
+    return _infer_style_from_prompt(f"{getattr(req, 'prompt', '')} {getattr(raw, 'topic', '')}")
+
+
 def _get_palette(style: StyleType) -> dict:
-    return STYLE_PALETTES.get(style, STYLE_PALETTES["Futuristic"])
+    canonical = _coerce_style_type(style, allow_auto=False)
+    return STYLE_PALETTES.get(canonical, STYLE_PALETTES["Futuristic"])
 
 
 def _get_card_accents(style: StyleType) -> List[str]:
-    return CARD_ACCENTS.get(style, CARD_ACCENTS["Futuristic"])
+    canonical = _coerce_style_type(style, allow_auto=False)
+    return CARD_ACCENTS.get(canonical, CARD_ACCENTS["Futuristic"])
 
 
 # ==============================================================================
@@ -319,21 +424,29 @@ def _cover_title_font_size(title: str) -> int:
 
 
 def _stat_number_font_size(value: str, box_w_in: float = 0.0) -> int:
-    """Cỡ chữ con số/từ khóa KHỔNG LỒ của BIG_STAT_CALLOUT.
+    """Cỡ chữ con số/từ khóa chính của BIG_STAT_CALLOUT.
 
-    Con số luôn LẤP ĐẦY bề ngang khối bên trái (và vì thế đạt 72pt+ với mọi
-    số liệu ngắn kiểu "92 bar", "465 °C", "+35%"), nhưng được hạ xuống khi chuỗi
-    quá dài để không bao giờ tràn ra ngoài thẻ.
+    Thiết kế mới ưu tiên một dòng ổn định (vd ``99.86%`` KHÔNG rớt dòng) thay vì
+    phóng số quá lớn. Cỡ chữ trần 64pt, tự hạ dần theo độ dài chuỗi và bề ngang
+    hộp; PPTX builder đặt ``word_wrap=False`` + auto-fit cho phần số chính.
     """
     text = (value or "").strip()
     n = len(text)
     if n == 0:
-        return 72
+        return 64
 
-    # Bề ngang chữ tối đa cho phép = bề ngang thẻ - lề trái/phải của PowerPoint.
-    inner_w = (box_w_in if box_w_in > 0 else 5.2) - 0.55
-    max_by_width = int(inner_w * 72.0 / (n * _AVG_CHAR_EM_BOLD))
-    return max(28, min(96, max_by_width))
+    if n <= 7:
+        target = 64
+    elif n <= 12:
+        target = 60
+    elif n <= 18:
+        target = 56
+    else:
+        target = 48
+
+    inner_w = max(0.5, (box_w_in if box_w_in > 0 else 5.2) - 0.44)
+    max_by_width = int(inner_w * 72.0 / max(1.0, n * _AVG_CHAR_EM_BOLD))
+    return max(40, min(target, max_by_width if box_w_in > 0 else target))
 
 
 def _chip_width_in(label: str) -> float:
@@ -422,7 +535,7 @@ def _calculate_cards_geometry_inches(
         return res
 
     # --------------------------------------------------------------------------
-    # 0d. CONCLUSION_SUMMARY (KẾT BÀI): các dòng tổng kết bên trong khung viền
+    # 0d. CONCLUSION_SUMMARY (KẾT BÀI): 3 dòng card mỏng, không frame lồng
     # --------------------------------------------------------------------------
     if layout == LayoutType.CONCLUSION_SUMMARY:
         return _conclusion_rows_geometry(max(n, 0))
@@ -657,37 +770,36 @@ def _cover_geometry(
 
 
 def _conclusion_frame_geometry() -> Tuple[float, float, float, float]:
-    """Khung viền tổng kết — đặt ở TRUNG TÂM vùng nội dung của slide kết bài."""
+    """Vùng logic chứa 3 dòng tổng kết (KHÔNG còn vẽ frame lồng bên ngoài)."""
     usable_w = SLIDE_W_IN - 2 * MX_IN
     return (MX_IN, SUM_FRAME_TOP_IN, round(usable_w, 3), round(SUM_FRAME_BOT_IN - SUM_FRAME_TOP_IN, 3))
 
 
 def _conclusion_rows_geometry(n: int) -> List[Tuple[float, float, float, float]]:
-    """Các dòng 'điểm cốt lõi' xếp dọc, căn giữa bên trong khung viền tổng kết."""
-    if n <= 0:
+    """3 dòng card mỏng xếp dọc, không bọc trong khung viền kép."""
+    rows = min(max(n, 0), 3)
+    if rows <= 0:
         return []
-    frame_x, frame_y, frame_w, frame_h = _conclusion_frame_geometry()
-    inner_w = round(frame_w - 2 * SUM_FRAME_PAD_X_IN, 3)
-    inner_top = frame_y + SUM_FRAME_PAD_Y_IN
-    inner_h = frame_h - 2 * SUM_FRAME_PAD_Y_IN
 
-    h = min(SUM_ROW_MAX_H_IN, (inner_h - (n - 1) * SUM_ROW_GAP_IN) / n)
-    stack_h = n * h + (n - 1) * SUM_ROW_GAP_IN
-    y0 = inner_top + (inner_h - stack_h) / 2
+    frame_x, frame_y, frame_w, frame_h = _conclusion_frame_geometry()
+    row_w = round(min(frame_w - 2 * SUM_FRAME_PAD_X_IN, 10.90), 3)
+    x0 = round(frame_x + (frame_w - row_w) / 2, 3)
+    h = min(SUM_ROW_MAX_H_IN, (frame_h - (rows - 1) * SUM_ROW_GAP_IN) / rows)
+    stack_h = rows * h + (rows - 1) * SUM_ROW_GAP_IN
+    y0 = round(frame_y + (frame_h - stack_h) / 2, 3)
 
     return [
-        (round(frame_x + SUM_FRAME_PAD_X_IN, 3),
-         round(y0 + i * (h + SUM_ROW_GAP_IN), 3),
-         inner_w,
-         round(h, 3))
-        for i in range(n)
+        (x0, round(y0 + i * (h + SUM_ROW_GAP_IN), 3), row_w, round(h, 3))
+        for i in range(rows)
     ]
 
 
 def _conclusion_cta_geometry() -> Tuple[float, float, float, float]:
-    """Thanh Call To Action nằm ngay dưới khung tổng kết, canh đều hai lề."""
+    """Thanh Call To Action nổi bật, thấp gọn (~0.8 inch) và căn giữa."""
     usable_w = SLIDE_W_IN - 2 * MX_IN
-    return (MX_IN, SUM_CTA_TOP_IN, round(usable_w, 3), SUM_CTA_H_IN)
+    cta_w = round(min(usable_w, 10.40), 3)
+    x = round(MX_IN + (usable_w - cta_w) / 2, 3)
+    return (x, SUM_CTA_TOP_IN, cta_w, SUM_CTA_H_IN)
 
 
 def _card_title_font_size(
@@ -945,31 +1057,12 @@ def _build_conclusion_elements(
 ) -> List[SlideElement]:
     """Dựng phần tử slide KẾT BÀI (CONCLUSION_SUMMARY).
 
-    Gồm: khung viền tổng kết ở trung tâm, các dòng 'điểm cốt lõi' đánh số bên
-    trong khung, và thanh Call To Action nổi bật ngay bên dưới.
+    Gồm: 3 dòng card mỏng độc lập (không còn frame lồng viền kép) và thanh
+    Call To Action nổi bật ngay bên dưới.
     """
     elements: List[SlideElement] = []
 
-    # 1) Khung viền tổng kết (nền nhạt + viền mảnh) — type "shape" để preview web
-    #    không vẽ trùng thành một thẻ nội dung.
-    fx, fy, fw, fh = _conclusion_frame_geometry()
-    elements.append(SlideElement(
-        id=f"slide{slide_idx}_summary_frame",
-        type="shape",
-        content="",
-        x=_pct_w(fx),
-        y=_pct_h(fy),
-        width=_pct_w(fw),
-        height=_pct_h(fh),
-        bg_color=palette["card_hero"],
-        text_color=None,
-        morph_id="summary_frame",
-        shape_type="rounded_rectangle",
-        border_color=palette["card_border"],
-        accent_color=accents[0],
-    ))
-
-    # 2) Các dòng điểm cốt lõi bên trong khung.
+    # 1) Các dòng điểm cốt lõi — card mỏng, bo góc, viền 0.75pt ở PPTX.
     row_coords = _conclusion_rows_geometry(num_rows)
     for i, (card, box) in enumerate(zip(row_cards, row_coords)):
         x, y, w, h = box
@@ -983,7 +1076,7 @@ def _build_conclusion_elements(
             y=_pct_h(y),
             width=_pct_w(w),
             height=_pct_h(h),
-            bg_color=palette["bg"],
+            bg_color=palette["card_fallback"],
             text_color=palette["text"],
             accent_color=_normalize_hex(card.color_theme, accents[i % len(accents)]),
             morph_id=card.morph_id,
@@ -993,7 +1086,7 @@ def _build_conclusion_elements(
             step=i + 1,
         ))
 
-    # 3) Thanh Call To Action.
+    # 2) Thanh Call To Action.
     if cta_text:
         cx, cy, cw, ch = _conclusion_cta_geometry()
         cta_accent = _normalize_hex(
@@ -1287,14 +1380,14 @@ def _resolve_slide_layouts(slides: List[SlideData]) -> List[LayoutType]:
 def _split_conclusion_cards(
     cards: List[ContentCard],
 ) -> Tuple[List[ContentCard], Optional[ContentCard]]:
-    """Tách thẻ slide KẾT BÀI thành (3 điểm cốt lõi, thẻ Call To Action).
+    """Tách slide kết bài thành đúng 3 dòng mỏng + 1 CTA.
 
-    Chuẩn thiết kế: 4 thẻ = 3 điểm cốt lõi + 1 CTA. Nếu LLM trả ít hơn 4 thẻ,
-    toàn bộ được coi là điểm cốt lõi và slide không có thanh CTA.
+    Nếu LLM trả quá nhiều thẻ, chỉ lấy 3 takeaway đầu và dùng thẻ cuối làm CTA để
+    giữ hình học gọn, không sinh thêm hộp lồng/tràn footer.
     """
     if len(cards) >= 4:
-        return cards[:-1], cards[-1]
-    return cards, None
+        return cards[:3], cards[-1]
+    return cards[:3], None
 
 
 def _speaker_notes_for(
@@ -1349,12 +1442,13 @@ def compute_layout(
       1. Sắp xếp slides theo slide_number, cắt bớt đúng số lượng yêu cầu.
       2. Thực thi mạch kể 3 phần + quy tắc không có 2 slide liên tiếp trùng layout.
       3. Tính toán hình học chuẩn xác theo từng layout_type.
-      4. Thêm badge, kicker, tiêu đề, subtitle/badge cover, khung tổng kết,
+      4. Thêm badge, kicker, tiêu đề, subtitle/badge cover, 3 card kết bài,
          bước lộ trình và footer.
       5. Tạo speaker_notes và morph_description hỗ trợ chuyển cảnh Morph.
     """
-    palette = _get_palette(req.style)
-    accents = _get_card_accents(req.style)
+    effective_style = _resolve_effective_style(raw, req)
+    palette = _get_palette(effective_style)
+    accents = _get_card_accents(effective_style)
     slides_out: List[Slide] = []
 
     sorted_raw_slides = sorted(raw.slides, key=lambda s: s.slide_number)
@@ -1447,7 +1541,7 @@ def compute_layout(
             if layout == LayoutType.TIMELINE_STEPS:
                 elements.extend(_build_step_elements(num_cards, card_coords_in, slide_number, palette, accents))
 
-        elements.extend(_build_footer_elements(slide_number, total, raw.topic, req.style, palette))
+        elements.extend(_build_footer_elements(slide_number, total, raw.topic, effective_style, palette))
 
         speaker_notes = None
         if req.include_speaker_notes:
@@ -1488,7 +1582,7 @@ def compute_layout(
 
     return PresentationResponse(
         topic=raw.topic,
-        style=req.style,
+        style=effective_style,
         aspect_ratio=req.aspect_ratio,
         total_slides=len(slides_out),
         slides=slides_out,
@@ -1497,9 +1591,9 @@ def compute_layout(
             f"{COVER_TITLE_MIN_PT}-{COVER_TITLE_MAX_PT}pt, lề {COVER_MX_IN}\") → thân bài "
             f"BIG_STAT_CALLOUT ({STAT_COL_RATIO:.0%} số khổng lồ) / ASYMMETRIC_GRID "
             f"({HERO_COL_RATIO:.0%}-{1 - HERO_COL_RATIO:.0%}) / TIMELINE_STEPS / CARDS_ROW "
-            f"→ kết bài CONCLUSION_SUMMARY (khung tổng kết + CTA). "
+            f"→ kết bài CONCLUSION_SUMMARY (3 card mỏng + CTA). "
             f"Lề thân bài M_x={MX_IN}\", khoảng cách G={GAP_IN}\". "
             f"Morph IDs nhất quán: badge_header, section_kicker, title_slide, title_rule, "
-            f"cover_subtitle, summary_frame, call_to_action, step_*, footer_topic/page + card IDs."
+            f"cover_subtitle, call_to_action, step_*, footer_topic/page + card IDs."
         ),
     )

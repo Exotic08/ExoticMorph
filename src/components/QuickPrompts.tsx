@@ -25,7 +25,6 @@ export const SAMPLE_PROMPTS: QuickPrompt[] = [
     description: "Slide gọi vốn Seed/Series A: Vấn đề thị trường, Giải pháp AI, Traction và Lộ trình phát triển sản phẩm.",
     promptText: "Tạo bài thuyết trình Pitch Deck gọi vốn 1 triệu USD cho startup 'NexusAI' - Nền tảng tự động hóa quy trình CSKH doanh nghiệp bằng Generative AI. Cần nêu rõ Problem, Solution, Market Size (TAM $50B), Business Model, Traction 2024 và kế hoạch giải ngân vốn.",
     recommendedCount: 5,
-    recommendedStyle: "Futuristic",
   },
   {
     id: "quarterly-growth",
@@ -36,7 +35,6 @@ export const SAMPLE_PROMPTS: QuickPrompt[] = [
     description: "Tổng hợp doanh thu, biểu đồ tỷ lệ giữ chân khách hàng (Retention), CAC, LTV và mục tiêu Q4.",
     promptText: "Báo cáo kết quả kinh doanh quý 3/2024 của công ty E-Commerce: Doanh thu đạt 12.5 triệu USD (+35% QoQ), Tỷ lệ chuyển đổi tăng từ 2.8% lên 4.2%, Chi phí CAC giảm 18%. Đưa ra 3 chiến lược mũi nhọn cho mùa mua sắm cuối năm Q4.",
     recommendedCount: 5,
-    recommendedStyle: "Corporate",
   },
   {
     id: "system-architecture",
@@ -47,7 +45,6 @@ export const SAMPLE_PROMPTS: QuickPrompt[] = [
     description: "Minh họa dòng dữ liệu từ API Gateway sang K8s clusters, Kafka queue và Database Sharding với hiệu ứng Morph.",
     promptText: "Trình bày kiến trúc kỹ thuật hệ thống FinTech xử lý 100,000 TPS: Giải thích luồng dữ liệu đi qua Cloudflare Edge, API Gateway, Event Mesh Kafka, Microservices Go/Rust và CockroachDB đa vùng. Nhấn mạnh tính chịu lỗi High Availability 99.999%.",
     recommendedCount: 3,
-    recommendedStyle: "Minimal",
   },
   {
     id: "ai-transformation-masterclass",
@@ -58,7 +55,6 @@ export const SAMPLE_PROMPTS: QuickPrompt[] = [
     description: "Khung năng lực số, lộ trình đào tạo nhân sự và áp dụng AI Agent vào chuỗi giá trị doanh nghiệp.",
     promptText: "Bài giảng chuyên sâu dành cho ban lãnh đạo về 'Chiến lược ứng dụng AI vào doanh nghiệp 2025-2030'. Phân tích 4 trụ cột: Văn hóa đổi mới, Hạ tầng dữ liệu, Ứng dụng Agentic AI và Quản trị rủi ro AI Ethics.",
     recommendedCount: 10,
-    recommendedStyle: "Creative",
   },
 ];
 
@@ -88,7 +84,7 @@ export const QuickPrompts: React.FC<QuickPromptsProps> = ({ onSelectPrompt }) =>
           </h3>
         </div>
         <span className="text-xs text-slate-500">
-          Nhấp để tự động điền và cấu hình
+          Nhấp để tự động điền nội dung
         </span>
       </div>
 
@@ -131,7 +127,7 @@ export const QuickPrompts: React.FC<QuickPromptsProps> = ({ onSelectPrompt }) =>
                 {item.recommendedCount} Slides
               </span>
               <span className="bg-cyan-500/10 text-cyan-300 px-2 py-0.5 rounded">
-                {item.recommendedStyle}
+                AI chọn style
               </span>
               <span className="text-slate-500 ml-auto group-hover:text-slate-300 transition-colors">
                 Thử ngay &rarr;

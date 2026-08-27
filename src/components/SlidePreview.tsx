@@ -11,13 +11,12 @@ import {
   Sparkles, 
   FileCheck2, 
   Layers, 
-  TrendingUp, 
   CheckCircle,
   Sliders
 } from "lucide-react";
-import { motion, AnimatePresence } from "framer-motion";
+import { motion } from "framer-motion";
 import confetti from "canvas-confetti";
-import { SlidePreviewData, SlideItem } from "@/types";
+import { BackendSlideElement, SlidePreviewData, SlideItem } from "@/types";
 import { downloadBlob } from "@/lib/download";
 
 interface SlidePreviewProps {
@@ -30,6 +29,50 @@ interface SlidePreviewProps {
   /** Báo lỗi tải file lên trang cha để hiển thị ErrorNotification thân thiện
    *  (thay cho alert() của bản cũ — alert chặn luồng UI và không style được). */
   onError?: (message: string) => void;
+}
+
+const SLIDE_WIDTH_IN = {
+  "16:9": 13.333,
+  "4:3": 10,
+} as const;
+const SLIDE_HEIGHT_IN = 7.5;
+const CARD_TEXT_PAD_IN = 0.18;
+const CARD_TEXT_PAD_TOP_IN = 0.20;
+const CARD_TEXT_PAD_BOTTOM_IN = 0.16;
+const CARD_BORDER_PT = 0.75;
+
+const PREVIEW_PALETTES: Record<string, { subText: string; text: string }> = {
+  Futuristic: { text: "#F6F8FB", subText: "#9AA3B5" },
+  Minimalist: { text: "#F2F5F7", subText: "#A8B3BE" },
+  Minimal: { text: "#F2F5F7", subText: "#A8B3BE" },
+  Corporate: { text: "#FFFFFF", subText: "#9FB0C9" },
+  CorporateMinimalist: { text: "#F8FAFC", subText: "#AAB6C8" },
+  Creative: { text: "#FFFFFF", subText: "#D3C7E2" },
+  Academic: { text: "#F4F7FA", subText: "#A7B3C2" },
+};
+
+function clampNumber(value: number | null | undefined, min: number, max: number): number {
+  if (typeof value !== "number" || Number.isNaN(value)) return min;
+  return Math.min(max, Math.max(min, value));
+}
+
+function hexToRgba(hex: string | null | undefined, alpha: number): string {
+  if (!hex) return `rgba(255,255,255,${alpha})`;
+  const normalized = hex.trim().replace("#", "");
+  if (!/^[0-9a-fA-F]{6}$/.test(normalized)) return `rgba(255,255,255,${alpha})`;
+  const r = Number.parseInt(normalized.slice(0, 2), 16);
+  const g = Number.parseInt(normalized.slice(2, 4), 16);
+  const b = Number.parseInt(normalized.slice(4, 6), 16);
+  return `rgba(${r}, ${g}, ${b}, ${alpha})`;
+}
+
+function bodyFontSize(titleSize: number): number {
+  if (titleSize >= 40) return 11.5;
+  if (titleSize >= 24) return 12.5;
+  if (titleSize >= 18) return 11.2;
+  if (titleSize >= 15) return 10.4;
+  if (titleSize >= 13) return 9.8;
+  return 9.2;
 }
 
 export const SlidePreview: React.FC<SlidePreviewProps> = ({
@@ -55,6 +98,20 @@ export const SlidePreview: React.FC<SlidePreviewProps> = ({
       if (successTimerRef.current) clearTimeout(successTimerRef.current);
     };
   }, []);
+
+  const slideCanvasRef = useRef<HTMLDivElement | null>(null);
+  const [slideCanvasWidth, setSlideCanvasWidth] = useState(0);
+
+  useEffect(() => {
+    const node = slideCanvasRef.current;
+    if (!node || typeof ResizeObserver === "undefined") return;
+
+    const updateSize = () => setSlideCanvasWidth(node.getBoundingClientRect().width);
+    updateSize();
+    const observer = new ResizeObserver(updateSize);
+    observer.observe(node);
+    return () => observer.disconnect();
+  }, [currentSlideIndex, data.aspectRatio]);
 
   // Hiệu ứng pháo hoa khi sinh slide thành công
   useEffect(() => {
@@ -130,6 +187,250 @@ export const SlidePreview: React.FC<SlidePreviewProps> = ({
       </div>
     );
   }
+
+  const currentElements = currentSlide.elements ?? [];
+  const slideWidthIn = SLIDE_WIDTH_IN[data.aspectRatio];
+  const pxPerIn = slideCanvasWidth > 0 ? slideCanvasWidth / slideWidthIn : 67.2;
+  const ptToPx = (pt: number) => Math.max(6, (pt / 72) * pxPerIn);
+  const inToPx = (inch: number) => inch * pxPerIn;
+  const palette = PREVIEW_PALETTES[data.style] ?? PREVIEW_PALETTES.Futuristic;
+  const cardLikeElements = currentElements.filter((e) => ["card", "text", "shape", "metric"].includes(e.type));
+  const primaryCardId = cardLikeElements.length >= 2 ? cardLikeElements[0]?.id : undefined;
+
+  const renderBackendElement = (elem: BackendSlideElement, idx: number) => {
+    const x = clampNumber(elem.x, 0, 100);
+    const y = clampNumber(elem.y, 0, 100);
+    const w = clampNumber(elem.width, 0.01, Math.max(0.01, 100 - x));
+    const h = clampNumber(elem.height, 0.01, Math.max(0.01, 100 - y));
+    const fontPt = elem.font_size ?? (elem.type === "footer" ? 9 : 12);
+    const baseStyle: React.CSSProperties = {
+      position: "absolute",
+      left: `${x}%`,
+      top: `${y}%`,
+      width: `${w}%`,
+      height: `${h}%`,
+      color: elem.text_color || palette.text,
+      fontFamily: "Segoe UI, Inter, ui-sans-serif, system-ui, sans-serif",
+      fontSize: ptToPx(fontPt),
+      lineHeight: elem.type === "heading" && fontPt >= 40 ? 1.04 : 1.12,
+      zIndex: elem.type === "accent" ? 1 : elem.type === "footer" ? 5 : 3,
+    };
+
+    const borderRadius = elem.shape_type === "oval" ? "9999px" : inToPx(0.14);
+    const border = elem.border_color
+      ? `${Math.max(1, ptToPx(CARD_BORDER_PT))}px solid ${hexToRgba(elem.border_color, 0.55)}`
+      : undefined;
+
+    if (elem.type === "accent" || elem.type === "connector") {
+      return (
+        <motion.div
+          key={`${elem.id}-${idx}`}
+          layoutId={`morph-${elem.morph_id || elem.id}`}
+          className="pointer-events-none"
+          style={{
+            ...baseStyle,
+            backgroundColor: elem.bg_color || elem.accent_color || "#8B5CF6",
+            borderRadius: elem.shape_type === "oval" ? "9999px" : 2,
+          }}
+        />
+      );
+    }
+
+    if (elem.type === "badge") {
+      return (
+        <motion.div
+          key={`${elem.id}-${idx}`}
+          layoutId={`morph-${elem.morph_id || elem.id}`}
+          initial={{ opacity: 0, scale: 0.96 }}
+          animate={{ opacity: 1, scale: 1 }}
+          transition={{ duration: 0.28 }}
+          style={{
+            ...baseStyle,
+            backgroundColor: elem.bg_color || "#7C3AED",
+            borderRadius,
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            fontWeight: 800,
+            whiteSpace: "nowrap",
+            overflow: "hidden",
+            textAlign: "center",
+            padding: `0 ${inToPx(0.12)}px`,
+          }}
+        >
+          {elem.content}
+        </motion.div>
+      );
+    }
+
+    if (elem.type === "heading" || elem.type === "kicker" || elem.type === "footer") {
+      const isKicker = elem.type === "kicker";
+      return (
+        <motion.div
+          key={`${elem.id}-${idx}`}
+          layoutId={`morph-${elem.morph_id || elem.id}`}
+          initial={{ opacity: 0, y: 4 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ duration: 0.3 }}
+          style={{
+            ...baseStyle,
+            display: "flex",
+            alignItems: elem.type === "footer" ? "center" : "flex-start",
+            justifyContent:
+              elem.align === "right" ? "flex-end" : elem.align === "center" ? "center" : "flex-start",
+            fontWeight: elem.type === "footer" ? 500 : 800,
+            letterSpacing: isKicker ? "0.22em" : elem.type === "footer" ? "0.01em" : "-0.025em",
+            textTransform: isKicker ? "uppercase" : undefined,
+            textAlign: elem.align || "left",
+            overflow: "hidden",
+            whiteSpace: elem.type === "footer" ? "nowrap" : "normal",
+          }}
+        >
+          {elem.content}
+        </motion.div>
+      );
+    }
+
+    const isCard = elem.type === "card" || elem.type === "metric" || elem.type === "text" || elem.type === "shape";
+    if (isCard) {
+      const isPrimary = elem.id === primaryCardId;
+      const isStatCard = (elem.font_size ?? 0) >= 40;
+      const isCta = elem.align === "center" && !elem.sub_text;
+      const elemWidthIn = (w / 100) * slideWidthIn;
+      const elemHeightIn = (h / 100) * SLIDE_HEIGHT_IN;
+      const accentInsetPct = elemWidthIn > 0 ? (0.08 / elemWidthIn) * 100 : 0;
+      const accentHeightPx = inToPx(isPrimary ? 0.075 : 0.045);
+      const titleSizePx = ptToPx(fontPt);
+      const statTitleH = Math.min(1.14, Math.max(0.72, elemHeightIn * 0.34));
+      const statBodyH = Math.max(0.30, elemHeightIn - statTitleH - 0.16 - 0.74);
+      const statTitleY = elemHeightIn >= 2.2 ? 0.54 : CARD_TEXT_PAD_TOP_IN;
+      const statBodyY = Math.min(
+        elemHeightIn - statBodyH - CARD_TEXT_PAD_BOTTOM_IN,
+        statTitleY + statTitleH + 0.16
+      );
+
+      return (
+        <motion.div
+          key={`${elem.id}-${idx}`}
+          layoutId={`morph-${elem.morph_id || elem.id}`}
+          initial={{ opacity: 0, scale: 0.985 }}
+          animate={{ opacity: 1, scale: 1 }}
+          transition={{ duration: 0.34, delay: Math.min(idx * 0.015, 0.12) }}
+          style={{
+            ...baseStyle,
+            backgroundColor: elem.bg_color || "#141827",
+            border,
+            borderRadius,
+            overflow: "hidden",
+            boxShadow: isPrimary ? "0 18px 42px rgba(0,0,0,0.20)" : "0 12px 30px rgba(0,0,0,0.15)",
+          }}
+        >
+          {!isCta && elem.type !== "shape" && (
+            <span
+              style={{
+                position: "absolute",
+                left: `${accentInsetPct}%`,
+                right: `${accentInsetPct}%`,
+                top: inToPx(0.045),
+                height: accentHeightPx,
+                backgroundColor: elem.accent_color || "#10B981",
+                borderRadius: 999,
+              }}
+            />
+          )}
+
+          {elem.type !== "shape" && isStatCard && (
+            <>
+              <div
+                style={{
+                  position: "absolute",
+                  left: inToPx(CARD_TEXT_PAD_IN),
+                  right: inToPx(CARD_TEXT_PAD_IN),
+                  top: inToPx(statTitleY),
+                  height: inToPx(statTitleH),
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "center",
+                  color: elem.text_color || palette.text,
+                  fontSize: titleSizePx,
+                  fontWeight: 900,
+                  lineHeight: 0.94,
+                  whiteSpace: "nowrap",
+                  overflow: "hidden",
+                  textOverflow: "clip",
+                  letterSpacing: "-0.055em",
+                }}
+              >
+                {elem.content}
+              </div>
+              {elem.sub_text && (
+                <div
+                  style={{
+                    position: "absolute",
+                    left: inToPx(CARD_TEXT_PAD_IN),
+                    right: inToPx(CARD_TEXT_PAD_IN),
+                    top: inToPx(statBodyY),
+                    height: inToPx(statBodyH),
+                    color: palette.subText,
+                    fontSize: ptToPx(bodyFontSize(fontPt)),
+                    lineHeight: 1.12,
+                    textAlign: "center",
+                    overflow: "hidden",
+                  }}
+                >
+                  {elem.sub_text}
+                </div>
+              )}
+            </>
+          )}
+
+          {elem.type !== "shape" && !isStatCard && (
+            <div
+              style={{
+                position: "absolute",
+                inset: isCta
+                  ? `${inToPx(0.08)}px ${inToPx(CARD_TEXT_PAD_IN)}px`
+                  : `${inToPx(CARD_TEXT_PAD_TOP_IN)}px ${inToPx(CARD_TEXT_PAD_IN)}px ${inToPx(CARD_TEXT_PAD_BOTTOM_IN)}px`,
+                display: "flex",
+                flexDirection: "column",
+                justifyContent: isCta ? "center" : "flex-start",
+                textAlign: elem.align || "left",
+                overflow: "hidden",
+              }}
+            >
+              <div
+                style={{
+                  color: elem.text_color || palette.text,
+                  fontSize: titleSizePx,
+                  fontWeight: 800,
+                  lineHeight: 1.08,
+                  letterSpacing: "-0.015em",
+                  overflow: "hidden",
+                }}
+              >
+                {elem.content}
+              </div>
+              {elem.sub_text && (
+                <div
+                  style={{
+                    marginTop: inToPx(0.07),
+                    color: palette.subText,
+                    fontSize: ptToPx(bodyFontSize(fontPt)),
+                    lineHeight: 1.12,
+                    overflow: "hidden",
+                  }}
+                >
+                  {elem.sub_text}
+                </div>
+              )}
+            </div>
+          )}
+        </motion.div>
+      );
+    }
+
+    return null;
+  };
 
   return (
     <div className="w-full max-w-5xl mx-auto space-y-6">
@@ -235,203 +536,43 @@ export const SlidePreview: React.FC<SlidePreviewProps> = ({
           </div>
         </div>
 
-        {/* Khung viewport slide (Tỉ lệ 16:9 hoặc 4:3) */}
+        {/* Khung viewport slide (Tỉ lệ 16:9 hoặc 4:3) — render từ tọa độ backend */}
         <div className="w-full flex items-center justify-center bg-black/60 rounded-xl p-2 sm:p-4 border border-white/[0.05]">
           <div
-            className={`w-full max-w-4xl relative rounded-xl overflow-hidden bg-gradient-to-br from-[#10121A] via-[#161926] to-[#0A0C13] border border-white/[0.12] shadow-2xl flex flex-col justify-between p-6 sm:p-10 transition-all duration-500 ${
+            ref={slideCanvasRef}
+            className={`w-full max-w-4xl relative rounded-xl overflow-hidden border border-white/[0.10] shadow-2xl transition-all duration-500 ${
               data.aspectRatio === "4:3" ? "slide-ratio-4-3" : "slide-ratio-16-9"
             }`}
+            style={{ backgroundColor: currentSlide.bgColor || "#0A0C12" }}
           >
-            <div className="absolute inset-0 bg-grid-pattern opacity-20 pointer-events-none" />
-
-            {/* Header của slide */}
-            <div className="relative z-10 flex items-start justify-between gap-4">
-              <div className="space-y-1">
-                {currentSlide.section && (
-                  <motion.span
-                    layoutId="slide-section"
-                    className="inline-block text-[10px] font-bold uppercase tracking-[0.25em] text-cyan-300/90"
-                  >
-                    {currentSlide.section}
-                  </motion.span>
-                )}
-                <div className="flex items-center gap-2">
-                  {currentSlide.badge && (
-                    <motion.span
-                      layoutId="slide-badge"
-                      className="inline-block px-2.5 py-0.5 rounded-full text-[10px] font-semibold bg-purple-500/20 text-purple-300 border border-purple-500/30"
-                    >
-                      {currentSlide.badge}
-                    </motion.span>
-                  )}
-                </div>
-                <AnimatePresence mode="wait">
-                  <motion.h3
-                    key={currentSlide.id + "-title"}
-                    initial={{ opacity: 0, y: 8 }}
-                    animate={{ opacity: 1, y: 0 }}
-                    exit={{ opacity: 0, y: -8 }}
-                    transition={{ duration: 0.35 }}
-                    className="text-xl sm:text-2xl md:text-3xl font-extrabold text-white tracking-tight"
-                  >
-                    {currentSlide.title}
-                  </motion.h3>
-                </AnimatePresence>
+            {currentElements.length > 0 ? (
+              currentElements.map((elem, idx) => renderBackendElement(elem, idx))
+            ) : (
+              <div className="absolute inset-0 p-8 flex flex-col justify-center text-center">
+                <h3 className="text-2xl font-extrabold text-white">{currentSlide.title}</h3>
                 {currentSlide.subtitle && (
-                  <motion.p
-                    key={currentSlide.id + "-sub"}
-                    initial={{ opacity: 0 }}
-                    animate={{ opacity: 1 }}
-                    className="text-xs sm:text-sm text-slate-400 font-medium"
-                  >
-                    {currentSlide.subtitle}
-                  </motion.p>
+                  <p className="mt-3 text-sm text-slate-400">{currentSlide.subtitle}</p>
                 )}
               </div>
-
-              <div className="flex items-center gap-1.5 px-2 py-1 rounded-md bg-white/[0.04] border border-white/[0.08] text-[10px] text-slate-400 shrink-0">
-                <Sparkles className="w-3 h-3 text-cyan-400" />
-                <span>ExoticMorph PPTX</span>
-              </div>
-            </div>
-
-            {/* Nội dung thân slide với hiệu ứng Morph động */}
-            <div className="relative z-10 my-auto py-4">
-              {/* Thẻ chỉ số Metrics */}
-              {currentSlide.metrics && currentSlide.metrics.length > 0 && (
-                <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 sm:gap-4">
-                  {currentSlide.metrics.map((metric, idx) => (
-                    <motion.div
-                      key={`metric-${idx}-${currentSlide.id}`}
-                      layoutId={`morph-card-${idx}`}
-                      initial={{ scale: 0.95, opacity: 0 }}
-                      animate={{ scale: 1, opacity: 1 }}
-                      transition={{ duration: 0.45, delay: idx * 0.08 }}
-                      className="p-4 rounded-xl bg-white/[0.04] border border-white/[0.08] hover:border-purple-500/40 transition-colors backdrop-blur-md relative group overflow-hidden"
-                    >
-                      <div className="text-xs text-slate-400 mb-1">{metric.label}</div>
-                      <div className="text-2xl sm:text-3xl font-black text-transparent bg-clip-text bg-gradient-to-r from-white via-purple-100 to-purple-300">
-                        {metric.value}
-                      </div>
-                      {metric.change && (
-                        <div className="mt-2 text-[11px] font-semibold text-emerald-400 flex items-center gap-1">
-                          <TrendingUp className="w-3 h-3" />
-                          <span>{metric.change}</span>
-                        </div>
-                      )}
-                      <div className="absolute top-0 right-0 w-16 h-16 bg-purple-500/5 rounded-full blur-xl group-hover:bg-purple-500/15 transition-all" />
-                    </motion.div>
-                  ))}
-                </div>
-              )}
-
-              {/* Thẻ nội dung hai phần: thông điệp cụ thể + đoạn diễn giải chi tiết */}
-              {currentSlide.cards && currentSlide.cards.length > 0 && (
-                <div
-                  className={`grid gap-3 ${
-                    currentSlide.cards.length === 1
-                      ? "grid-cols-1"
-                      : currentSlide.cards.length === 2
-                      ? "grid-cols-1 sm:grid-cols-2"
-                      : currentSlide.cards.length === 3
-                      ? "grid-cols-1 sm:grid-cols-3"
-                      : "grid-cols-1 sm:grid-cols-2 lg:grid-cols-4"
-                  }`}
-                >
-                  {currentSlide.cards.map((card, idx) => (
-                    <motion.div
-                      key={`card-${idx}-${currentSlide.id}`}
-                      layoutId={`morph-card-${idx}`}
-                      initial={{ scale: 0.96, opacity: 0, y: 8 }}
-                      animate={{ scale: 1, opacity: 1, y: 0 }}
-                      transition={{ duration: 0.4, delay: idx * 0.06 }}
-                      className="relative p-4 rounded-xl bg-white/[0.04] border border-white/[0.08] overflow-hidden backdrop-blur-md group"
-                    >
-                      {card.accentColor && (
-                        <span
-                          className="absolute top-0 left-0 right-0 h-[3px]"
-                          style={{ backgroundColor: card.accentColor }}
-                        />
-                      )}
-                      <div className="flex items-center gap-2 mb-2">
-                        {card.step && (
-                          <span
-                            className="w-5 h-5 rounded-full text-[11px] font-bold flex items-center justify-center shrink-0 text-white"
-                            style={{ backgroundColor: card.accentColor || "#8B5CF6" }}
-                          >
-                            {card.step}
-                          </span>
-                        )}
-                        <h4 className="text-sm sm:text-base font-bold text-white leading-snug">
-                          {card.title}
-                        </h4>
-                      </div>
-                      <p className="text-xs sm:text-[13px] text-slate-400 leading-relaxed">
-                        {card.body}
-                      </p>
-                    </motion.div>
-                  ))}
-                </div>
-              )}
-
-              {/* Fallback danh sách luận điểm (khi backend trả text/heading) */}
-              {(!currentSlide.cards || currentSlide.cards.length === 0) &&
-                currentSlide.bulletPoints &&
-                currentSlide.bulletPoints.length > 0 && (
-                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                    {currentSlide.bulletPoints.map((point, idx) => (
-                      <motion.div
-                        key={`bullet-${idx}-${currentSlide.id}`}
-                        layoutId={`morph-bullet-${idx}`}
-                        initial={{ x: -10, opacity: 0 }}
-                        animate={{ x: 0, opacity: 1 }}
-                        transition={{ duration: 0.4, delay: idx * 0.06 }}
-                        className="p-3.5 rounded-xl bg-white/[0.03] border border-white/[0.06] flex items-start gap-3"
-                      >
-                        <span className="w-5 h-5 rounded-full bg-purple-500/20 text-purple-300 text-xs font-bold flex items-center justify-center shrink-0 mt-0.5 border border-purple-500/30">
-                          {idx + 1}
-                        </span>
-                        <p className="text-xs sm:text-sm text-slate-200 leading-relaxed font-normal">
-                          {point}
-                        </p>
-                      </motion.div>
-                    ))}
-                  </div>
-                )}
-
-              {/* Chỉ báo trạng thái Morph Anchor */}
-              <motion.div
-                layoutId="morph-active-indicator"
-                className="mt-4 p-2.5 rounded-lg bg-purple-950/30 border border-purple-500/30 flex items-center justify-between text-[11px] text-purple-300"
-              >
-                <div className="flex items-center gap-2">
-                  <span className="w-2 h-2 rounded-full bg-purple-400 animate-ping" />
-                  <span>
-                    <strong>Morph Anchor Active:</strong> {currentSlide.morphAnchors?.[0]?.name || "Seamless Shape Transition"}
-                  </span>
-                </div>
-                <span className="text-[10px] bg-purple-500/20 px-2 py-0.5 rounded font-mono">
-                  {currentSlide.morphAnchors?.[0]?.transitionType || "translate & scale"}
-                </span>
-              </motion.div>
-            </div>
-
-            {/* Footer của slide */}
-            <div className="relative z-10 pt-3 border-t border-white/[0.06] flex items-center justify-between text-[11px] text-slate-400">
-              <div className="flex items-center gap-2">
-                <span>{data.presentationTitle}</span>
-                {currentSlide.tags?.map((tag) => (
-                  <span key={tag} className="hidden sm:inline-block px-1.5 py-0.5 rounded bg-white/[0.05] text-[10px]">
-                    #{tag}
-                  </span>
-                ))}
-              </div>
-              <span className="font-mono font-semibold text-slate-300">
-                0{currentSlideIndex + 1} / 0{data.slides.length}
-              </span>
-            </div>
+            )}
           </div>
         </div>
+
+        {/* Chỉ báo trạng thái Morph Anchor — nằm ngoài canvas để preview khớp PPTX */}
+        <motion.div
+          layoutId="morph-active-indicator"
+          className="mt-4 p-2.5 rounded-lg bg-purple-950/30 border border-purple-500/30 flex items-center justify-between text-[11px] text-purple-300"
+        >
+          <div className="flex items-center gap-2 min-w-0">
+            <span className="w-2 h-2 rounded-full bg-purple-400 animate-ping shrink-0" />
+            <span className="truncate">
+              <strong>Morph Anchor Active:</strong> {currentSlide.morphAnchors?.[0]?.name || "Seamless Shape Transition"}
+            </span>
+          </div>
+          <span className="text-[10px] bg-purple-500/20 px-2 py-0.5 rounded font-mono shrink-0">
+            {currentSlide.backendLayoutType || currentSlide.morphAnchors?.[0]?.transitionType || "translate & scale"}
+          </span>
+        </motion.div>
 
         {/* Thanh điều khiển & Thumbnails */}
         <div className="mt-5 flex flex-col sm:flex-row items-center justify-between gap-4">

@@ -35,7 +35,7 @@ export default function HomePage() {
     topic: "",
     slideCount: 5,
     aspectRatio: "16:9",
-    style: "Futuristic",
+    style: "AUTO",
     includeSpeakerNotes: true,
   });
 
@@ -156,7 +156,7 @@ export default function HomePage() {
       ...prev,
       topic: item.promptText,
       slideCount: item.recommendedCount,
-      style: item.recommendedStyle,
+      style: "AUTO",
     }));
   }, []);
 

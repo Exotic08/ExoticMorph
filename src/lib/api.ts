@@ -156,7 +156,8 @@ function buildGeneratePayload(formData: PromptFormData) {
   return {
     prompt: formData.topic.trim(),
     num_slides: formData.slideCount,
-    style: formData.style,
+    // UI không còn dropdown style; luôn để backend/LLM tự chọn phong cách phù hợp.
+    style: "AUTO",
     aspect_ratio: formData.aspectRatio,
     language: "vi",
     include_speaker_notes: formData.includeSpeakerNotes ?? true,
@@ -278,6 +279,7 @@ export async function generatePresentationPreview(
       morphAnchors: s.elements.map((e) => ({
         id: e.morph_id,
         name: `Anchor: !!${e.morph_id}`,
+        fromCoords: { x: e.x, y: e.y, w: e.width, h: e.height },
         transitionType: "translate" as const,
       })),
       // Ưu tiên speaker notes THẬT từ backend; chỉ tự sinh câu chào khi backend không có.
@@ -285,6 +287,9 @@ export async function generatePresentationPreview(
         s.speaker_notes?.trim() ||
         `Lời dẫn slide ${s.slide_number}: Trình bày chi tiết về ${s.title}...`,
       tags: [data.style, `Slide-${s.slide_number}`, ...contentBadges.slice(0, 3)],
+      elements: s.elements,
+      bgColor: s.bg_color || null,
+      backendLayoutType: rawLayout || undefined,
     };
   });
 

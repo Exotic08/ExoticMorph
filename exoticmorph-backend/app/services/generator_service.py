@@ -19,8 +19,10 @@ from typing import Optional, Tuple
 from pptx import Presentation
 from pptx.util import Inches, Pt, Emu
 from pptx.enum.shapes import MSO_SHAPE
-from pptx.enum.text import PP_ALIGN
+from pptx.enum.text import PP_ALIGN, MSO_AUTO_SIZE, MSO_ANCHOR
 from pptx.dml.color import RGBColor
+from pptx.oxml.xmlchemy import OxmlElement
+from pptx.oxml.ns import qn
 
 from app.schemas.slide_schema import PresentationResponse, Slide, SlideElement
 from app.core.xml_helper import enable_morph_transition, set_shape_morph_id
@@ -28,6 +30,12 @@ from app.services.layout_engine import STYLE_PALETTES
 
 # Thời lượng chuyển cảnh Morph (ms) — nhanh, dứt khoát như keynote chuyên nghiệp.
 MORPH_DURATION_MS = 900
+EMU_PER_INCH = 914400
+CARD_TEXT_PAD_IN = 0.18   # 12.96pt — đồng bộ preview web và PPTX
+CARD_TEXT_PAD_TOP_IN = 0.20  # 14.4pt
+CARD_TEXT_PAD_BOTTOM_IN = 0.16  # 11.52pt
+CARD_BORDER_PT = 0.75
+CARD_BORDER_OPACITY = 0.55
 
 
 def hex_to_rgb(hex_str: Optional[str], default: RGBColor = RGBColor(255, 255, 255)) -> RGBColor:
@@ -51,6 +59,34 @@ def hex_to_rgb(hex_str: Optional[str], default: RGBColor = RGBColor(255, 255, 25
         return RGBColor(r, g, b)
     except ValueError:
         return default
+
+
+def _set_line_opacity(shape, opacity: float = CARD_BORDER_OPACITY) -> None:
+    """Thiết lập opacity cho stroke bằng OpenXML (0..1).
+
+    python-pptx chưa expose trực tiếp alpha của line color, nên cần chèn
+    ``<a:alpha>`` vào ``a:srgbClr``. Nếu XML khác kỳ vọng thì bỏ qua an toàn.
+    """
+    try:
+        opacity = max(0.0, min(1.0, opacity))
+        ln = shape._element.spPr.get_or_add_ln()
+        solid = ln.find(qn("a:solidFill"))
+        if solid is None:
+            return
+        srgb = solid.find(qn("a:srgbClr"))
+        if srgb is None:
+            return
+        alpha = srgb.find(qn("a:alpha"))
+        if alpha is None:
+            alpha = OxmlElement("a:alpha")
+            srgb.append(alpha)
+        alpha.set("val", str(int(opacity * 100000)))
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _emu_to_inches(value: Emu) -> float:
+    return float(value) / EMU_PER_INCH
 
 
 def _set_letter_spacing(run, spacing_pt: float) -> None:
@@ -137,15 +173,17 @@ class PPTXMorphGeneratorService:
     @staticmethod
     def _body_font_size(title_size: int) -> float:
         """Cỡ chữ thân bài co giãn theo cỡ chữ tiêu đề để giữ phân cấp thị giác."""
+        if title_size >= 40:
+            return 11.5
         if title_size >= 24:
-            return 14.0
+            return 12.5
         if title_size >= 18:
-            return 12.0
+            return 11.2
         if title_size >= 15:
-            return 11.0
+            return 10.4
         if title_size >= 13:
-            return 10.0
-        return 9.5
+            return 9.8
+        return 9.2
 
     # ==========================================================================
     # CÁC LOẠI PHẦN TỬ
@@ -231,12 +269,18 @@ class PPTXMorphGeneratorService:
     def _add_card(self, slide, elem: SlideElement, is_primary: bool) -> None:
         """Thẻ nội dung 2 phần: tiêu đề (thông điệp cụ thể) + đoạn diễn giải chi tiết.
 
-        - Nền tối sang trọng, viền mảnh.
-        - Thanh accent trên đỉnh (màu nhận diện của thẻ), dày hơn cho thẻ chính.
-        - Tiêu đề đậm, thân bài tương phản cao với khoảng cách dòng thoáng.
+        Thiết kế mới:
+        - Card cao tối đa ~50% slide (hình học do layout_engine tính).
+        - Stroke siêu mỏng 0.75pt có alpha nhẹ, tránh khối viền dày.
+        - Padding text 12-16pt để PPTX khớp với preview web.
+        - BIG_STAT_CALLOUT dùng text box riêng, ``word_wrap=False`` cho số chính
+          để chuỗi như ``99.86%`` luôn nằm trên một dòng.
         """
         left, top, width, height = self._pct_to_inches(elem.x, elem.y, elem.width, elem.height)
         accent_rgb = hex_to_rgb(elem.accent_color, RGBColor(16, 185, 129))
+        title_size = int(elem.font_size or 15)
+        is_stat_card = title_size >= 40
+        is_cta = elem.align == "center" and not elem.sub_text
 
         # --- Thân thẻ (vẽ trước, nằm dưới thanh accent) ---
         shape = slide.shapes.add_shape(
@@ -246,48 +290,108 @@ class PPTXMorphGeneratorService:
         shape.fill.fore_color.rgb = hex_to_rgb(elem.bg_color, RGBColor(20, 24, 39))
         if elem.border_color:
             shape.line.color.rgb = hex_to_rgb(elem.border_color, RGBColor(40, 46, 66))
-            shape.line.width = Pt(1.0)
+            shape.line.width = Pt(CARD_BORDER_PT)
+            _set_line_opacity(shape, CARD_BORDER_OPACITY)
         else:
             shape.line.fill.background()
 
-        # --- Thanh accent trên đỉnh (vẽ sau để nổi trên nền thẻ) ---
-        bar_h = 0.09 if is_primary else 0.05
-        bar = slide.shapes.add_shape(
-            MSO_SHAPE.RECTANGLE,
-            left + Inches(0.08), top + Inches(0.045), width - Inches(0.16), Inches(bar_h),
-        )
-        bar.fill.solid()
-        bar.fill.fore_color.rgb = accent_rgb
-        bar.line.fill.background()
-        set_shape_morph_id(bar, f"{elem.morph_id}_accent")
+        # CTA là một thanh màu đầy đủ, không cần accent bar lặp lại trên đầu.
+        if not is_cta and elem.type != "shape":
+            bar_h = 0.075 if is_primary else 0.045
+            bar = slide.shapes.add_shape(
+                MSO_SHAPE.RECTANGLE,
+                left + Inches(0.08), top + Inches(0.045), width - Inches(0.16), Inches(bar_h),
+            )
+            bar.fill.solid()
+            bar.fill.fore_color.rgb = accent_rgb
+            bar.line.fill.background()
+            set_shape_morph_id(bar, f"{elem.morph_id}_accent")
+
+        if is_stat_card:
+            # Shape chỉ giữ nền/viền; text được đặt bằng 2 textbox để số chính
+            # không wrap còn mô tả vẫn wrap bình thường.
+            shape.text_frame.clear()
+            w_in = _emu_to_inches(width)
+            h_in = _emu_to_inches(height)
+            pad = CARD_TEXT_PAD_IN
+            inner_w = max(0.2, w_in - 2 * pad)
+            title_h = min(1.14, max(0.72, h_in * 0.34))
+            body_gap = 0.16
+            body_h = max(0.30, h_in - title_h - body_gap - 0.74)
+            title_y = 0.54 if h_in >= 2.2 else CARD_TEXT_PAD_TOP_IN
+            body_y = min(h_in - body_h - CARD_TEXT_PAD_BOTTOM_IN, title_y + title_h + body_gap)
+
+            title_box = slide.shapes.add_textbox(
+                left + Inches(pad), top + Inches(title_y), Inches(inner_w), Inches(title_h)
+            )
+            title_tf = title_box.text_frame
+            title_tf.word_wrap = False
+            title_tf.auto_size = MSO_AUTO_SIZE.TEXT_TO_FIT_SHAPE
+            title_tf.margin_left = title_tf.margin_right = 0
+            title_tf.margin_top = title_tf.margin_bottom = 0
+            p_title = title_tf.paragraphs[0]
+            p_title.text = elem.content
+            p_title.alignment = PP_ALIGN.CENTER
+            p_title.font.bold = True
+            p_title.font.size = Pt(title_size)
+            p_title.font.color.rgb = hex_to_rgb(elem.text_color, RGBColor(255, 255, 255))
+            p_title.font.name = "Segoe UI"
+            set_shape_morph_id(title_box, f"{elem.morph_id}_value")
+
+            if elem.sub_text:
+                body_box = slide.shapes.add_textbox(
+                    left + Inches(pad), top + Inches(body_y), Inches(inner_w), Inches(body_h)
+                )
+                body_tf = body_box.text_frame
+                body_tf.word_wrap = True
+                body_tf.auto_size = MSO_AUTO_SIZE.TEXT_TO_FIT_SHAPE
+                body_tf.margin_left = body_tf.margin_right = 0
+                body_tf.margin_top = body_tf.margin_bottom = 0
+                p_body = body_tf.paragraphs[0]
+                p_body.text = elem.sub_text.strip()
+                p_body.alignment = PP_ALIGN.CENTER
+                p_body.font.size = Pt(self._body_font_size(title_size))
+                p_body.font.color.rgb = hex_to_rgb(self.palette.get("sub_text"), RGBColor(165, 175, 195))
+                p_body.font.name = "Segoe UI"
+                p_body.line_spacing = 1.12
+                set_shape_morph_id(body_box, f"{elem.morph_id}_body")
+
+            set_shape_morph_id(shape, elem.morph_id)
+            return
 
         tf = shape.text_frame
         tf.word_wrap = True
-        tf.margin_left = Inches(0.24)
-        tf.margin_right = Inches(0.24)
-        tf.margin_top = Inches(0.30 if is_primary else 0.26)
-        tf.margin_bottom = Inches(0.18)
-
-        title_size = int(elem.font_size or 15)
+        tf.auto_size = MSO_AUTO_SIZE.TEXT_TO_FIT_SHAPE
+        tf.margin_left = Inches(CARD_TEXT_PAD_IN)
+        tf.margin_right = Inches(CARD_TEXT_PAD_IN)
+        tf.margin_top = Inches(CARD_TEXT_PAD_TOP_IN if not is_cta else 0.08)
+        tf.margin_bottom = Inches(CARD_TEXT_PAD_BOTTOM_IN if not is_cta else 0.08)
+        if is_cta:
+            try:
+                tf.vertical_anchor = MSO_ANCHOR.MIDDLE
+            except Exception:  # noqa: BLE001
+                pass
 
         # 1) Tiêu đề — thông điệp cụ thể, in đậm, tương phản cao.
         p_title = tf.paragraphs[0]
         p_title.text = elem.content
+        p_title.alignment = self._alignment(elem.align)
         p_title.font.bold = True
         p_title.font.size = Pt(title_size)
         p_title.font.color.rgb = hex_to_rgb(elem.text_color, RGBColor(255, 255, 255))
         p_title.font.name = "Segoe UI"
 
-        # 2) Đoạn diễn giải chi tiết (2-3 câu) — màu phụ, khoảng cách dòng thoáng.
+        # 2) Đoạn diễn giải chi tiết — màu phụ, khoảng cách dòng thoáng.
         if elem.sub_text:
             body = elem.sub_text.strip()
             p_body = tf.add_paragraph()
-            p_body.space_before = Pt(8)
+            p_body.space_before = Pt(5)
             p_body.text = body
+            p_body.alignment = self._alignment(elem.align)
             p_body.font.size = Pt(self._body_font_size(title_size))
             p_body.font.color.rgb = hex_to_rgb(self.palette.get("sub_text"), RGBColor(165, 175, 195))
             p_body.font.name = "Segoe UI"
-            p_body.line_spacing = 1.14
+            p_body.line_spacing = 1.12
 
         set_shape_morph_id(shape, elem.morph_id)
 
