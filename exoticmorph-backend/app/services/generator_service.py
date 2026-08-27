@@ -526,11 +526,14 @@ class PPTXMorphGeneratorService:
         tf.margin_right = Inches(CARD_TEXT_PAD_IN)
         tf.margin_top = Inches(CARD_TEXT_PAD_TOP_IN if not is_cta else 0.08)
         tf.margin_bottom = Inches(CARD_TEXT_PAD_BOTTOM_IN if not is_cta else 0.08)
-        if is_cta:
-            try:
-                tf.vertical_anchor = MSO_ANCHOR.MIDDLE
-            except Exception:  # noqa: BLE001
-                pass
+        try:
+            # Canh giữa dọc cho MỌI card (không chỉ CTA): khi nội dung ngắn hơn
+            # khung (khung được cấp theo hằng số cố định, không co theo chữ),
+            # văn bản sẽ nằm giữa thay vì dồn lên đỉnh và để trống hẳn phía dưới —
+            # giảm cảm giác "khung to, chữ bé, lệch hẳn lên trên".
+            tf.vertical_anchor = MSO_ANCHOR.MIDDLE
+        except Exception:  # noqa: BLE001
+            pass
 
         # 1) Tiêu đề — thông điệp cụ thể, in đậm, tương phản cao.
         #    Card có icon motif: icon là run riêng (không gắn font name để emoji
