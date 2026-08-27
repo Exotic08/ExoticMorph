@@ -40,6 +40,9 @@ yarn-error.log*
 # Vercel
 .vercel
 
+# Verification artifacts (ảnh đối chiếu parity + file .pptx mẫu sinh cục bộ)
+/verification
+
 # TypeScript
 *.tsbuildinfo
 next-env.d.ts
