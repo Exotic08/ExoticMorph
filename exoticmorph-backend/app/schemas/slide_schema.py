@@ -4,7 +4,8 @@ Pydantic Schemas for Slide Generation & LLM Structured Outputs
 TÁCH BIỆT TRÁCH NHIỆM (Separation of Concerns):
 
 1. **LLM Content Schema** (cho AI sáng tạo — KHÔNG có tọa độ hình học):
-   - `LayoutType`        : Enum 5 kiểu bố cục đa dạng (CARDS_ROW, SPLIT_HERO, STAT_GRID, TIMELINE_STEPS, GRID_2X2)
+   - `LayoutType`        : Enum bố cục chuẩn Designer, tổ chức theo MẠCH KỂ 3 PHẦN
+                           (COVER_HERO → thân bài → CONCLUSION_SUMMARY)
    - `ContentCard`       : một thẻ nội dung (morph_id, title, description, color_theme, order)
    - `SlideData`         : một slide thô (slide_number, section, slide_title, layout_type, cards)
    - `RawSlideContent`   : bí danh tương thích ngược của SlideData
@@ -19,10 +20,14 @@ QUY TẮC VÀNG:
    - LLM KHÔNG BAO GIỜ được trả về x, y, width, height. Python tính mọi thứ.
    - LLM chỉ trả về: chữ (nội dung), ý tưởng (title/description), màu (color_theme),
      morph_id (để giữ liên kết Morph giữa các slide) và lựa chọn layout_type phù hợp ngữ cảnh.
+   - MẠCH KỂ 3 PHẦN (Narrative Arc) là BẮT BUỘC:
+       Slide 1      → COVER_HERO          (Mở bài: hook / câu hỏi dẫn dắt)
+       Slide 2..N-1 → BIG_STAT_CALLOUT | ASYMMETRIC_GRID | TIMELINE_STEPS | CARDS_ROW
+       Slide N      → CONCLUSION_SUMMARY  (Kết bài: 3 điểm cốt lõi + call to action)
 """
 
 from enum import Enum
-from typing import Any, List, Optional, Literal
+from typing import Any, Dict, List, Optional, Literal, Tuple
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
@@ -35,28 +40,81 @@ _LLM_STRICT = ConfigDict(extra="forbid")
 # ==============================================================================
 
 class LayoutType(str, Enum):
-    """5 kiểu bố cục đa dạng cho slide trình chiếu (Dynamic Layout Diversity).
+    """Bố cục chuẩn Designer, chia theo 3 phần của mạch kể chuyện (Narrative Arc).
 
-    - CARDS_ROW      : 2-3 thẻ nằm ngang (Layout mặc định truyền thống).
-    - SPLIT_HERO     : Cột trái rộng (ý chính/Hero point), cột phải xếp 2 thẻ phụ.
-    - STAT_GRID      : Slide nhấn mạnh số liệu (con số to nổi bật + label ngắn).
-    - TIMELINE_STEPS : Tiến trình 3-4 bước theo chiều ngang.
-    - GRID_2X2       : Lưới 4 thẻ chia đều 2 hàng x 2 cột.
+    ── MỞ BÀI (Opening) ───────────────────────────────────────────────
+    - COVER_HERO        : Slide mở bài — tiêu đề SIÊU LỚN (44-52pt) lệch trái,
+                          subtitle nổi bật, hàng badge/tag, nhiều khoảng trắng.
+
+    ── THÂN BÀI (Body) — dùng XEN KẼ, không lặp 2 slide liên tiếp ─────
+    - BIG_STAT_CALLOUT  : 1 số liệu/từ khóa KHỔNG LỒ (72pt+) bên trái,
+                          khối văn bản giải thích xếp dọc bên phải.
+    - ASYMMETRIC_GRID   : Lưới bất đối xứng 60% - 40%: thẻ Hero chiếm 60%
+                          chiều rộng, 2 thẻ phụ nhỏ xếp dọc bên phải.
+    - CARDS_ROW         : 2-3 thẻ nằm ngang cân đối.
+    - TIMELINE_STEPS    : Quy trình/tiến trình 3-4 bước ngang (số thứ tự + đường nối).
+
+    ── KẾT BÀI (Closing) ──────────────────────────────────────────────
+    - CONCLUSION_SUMMARY: Khung viền tổng kết đặt ở trung tâm chứa 3 điểm cốt lõi
+                          + thanh Call To Action bên dưới.
+
+    ── LEGACY (tương thích ngược, Layout Engine tự nâng cấp) ───────────
+    - SPLIT_HERO, STAT_GRID, GRID_2X2 : các bố cục đời cũ, vẫn parse được nhưng
+      Layout Engine sẽ ánh xạ sang bố cục mới tương đương.
     """
 
+    # --- Mở bài ---
+    COVER_HERO = "COVER_HERO"
+    # --- Thân bài ---
+    BIG_STAT_CALLOUT = "BIG_STAT_CALLOUT"
+    ASYMMETRIC_GRID = "ASYMMETRIC_GRID"
     CARDS_ROW = "CARDS_ROW"
+    TIMELINE_STEPS = "TIMELINE_STEPS"
+    # --- Kết bài ---
+    CONCLUSION_SUMMARY = "CONCLUSION_SUMMARY"
+    # --- Legacy (tương thích ngược) ---
     SPLIT_HERO = "SPLIT_HERO"
     STAT_GRID = "STAT_GRID"
-    TIMELINE_STEPS = "TIMELINE_STEPS"
     GRID_2X2 = "GRID_2X2"
 
 
 # Bảng ánh xạ linh hoạt hỗ trợ tương thích ngược (chấp nhận cả alias chữ thường/cũ)
 _LAYOUT_ALIAS_MAP = {
+    # --- Mở bài ---
+    "COVER_HERO": LayoutType.COVER_HERO,
+    "COVER": LayoutType.COVER_HERO,
+    "COVER_SLIDE": LayoutType.COVER_HERO,
+    "TITLE_HERO": LayoutType.COVER_HERO,
+    "TITLE": LayoutType.COVER_HERO,
+    "OPENING": LayoutType.COVER_HERO,
+    "HERO_COVER": LayoutType.COVER_HERO,
+    # --- Thân bài ---
+    "BIG_STAT_CALLOUT": LayoutType.BIG_STAT_CALLOUT,
+    "BIG_STAT": LayoutType.BIG_STAT_CALLOUT,
+    "STAT_CALLOUT": LayoutType.BIG_STAT_CALLOUT,
+    "CALLOUT": LayoutType.BIG_STAT_CALLOUT,
+    "BIG_NUMBER": LayoutType.BIG_STAT_CALLOUT,
+    "ASYMMETRIC_GRID": LayoutType.ASYMMETRIC_GRID,
+    "ASYMMETRIC": LayoutType.ASYMMETRIC_GRID,
+    "ASYM_GRID": LayoutType.ASYMMETRIC_GRID,
+    "ASYMMETRIC_CARDS": LayoutType.ASYMMETRIC_GRID,
     "CARDS_ROW": LayoutType.CARDS_ROW,
     "CARDS": LayoutType.CARDS_ROW,
     "FEATURES": LayoutType.CARDS_ROW,
     "COMPARE": LayoutType.CARDS_ROW,
+    "TIMELINE_STEPS": LayoutType.TIMELINE_STEPS,
+    "TIMELINE": LayoutType.TIMELINE_STEPS,
+    "ROADMAP": LayoutType.TIMELINE_STEPS,
+    "STEPS": LayoutType.TIMELINE_STEPS,
+    # --- Kết bài ---
+    "CONCLUSION_SUMMARY": LayoutType.CONCLUSION_SUMMARY,
+    "CONCLUSION": LayoutType.CONCLUSION_SUMMARY,
+    "SUMMARY": LayoutType.CONCLUSION_SUMMARY,
+    "SUMMARY_CARD": LayoutType.CONCLUSION_SUMMARY,
+    "TAKEAWAYS": LayoutType.CONCLUSION_SUMMARY,
+    "KEY_TAKEAWAYS": LayoutType.CONCLUSION_SUMMARY,
+    "CLOSING": LayoutType.CONCLUSION_SUMMARY,
+    # --- Legacy ---
     "SPLIT_HERO": LayoutType.SPLIT_HERO,
     "HERO": LayoutType.SPLIT_HERO,
     "SPLIT": LayoutType.SPLIT_HERO,
@@ -65,14 +123,41 @@ _LAYOUT_ALIAS_MAP = {
     "STATS": LayoutType.STAT_GRID,
     "METRICS": LayoutType.STAT_GRID,
     "METRICS_GRID": LayoutType.STAT_GRID,
-    "TIMELINE_STEPS": LayoutType.TIMELINE_STEPS,
-    "TIMELINE": LayoutType.TIMELINE_STEPS,
-    "ROADMAP": LayoutType.TIMELINE_STEPS,
-    "STEPS": LayoutType.TIMELINE_STEPS,
     "GRID_2X2": LayoutType.GRID_2X2,
     "GRID": LayoutType.GRID_2X2,
     "2X2": LayoutType.GRID_2X2,
 }
+
+
+# ==============================================================================
+# 0b. NHÓM BỐ CỤC THEO MẠCH KỂ 3 PHẦN (dùng bởi Layout Engine & System Prompt)
+# ==============================================================================
+
+#: Layout BẮT BUỘC cho slide MỞ BÀI (slide 1).
+OPENING_LAYOUTS: Tuple[LayoutType, ...] = (LayoutType.COVER_HERO,)
+
+#: Layout BẮT BUỘC cho slide KẾT BÀI (slide cuối).
+CLOSING_LAYOUTS: Tuple[LayoutType, ...] = (LayoutType.CONCLUSION_SUMMARY,)
+
+#: Các layout hợp lệ cho phần THÂN BÀI (slide 2 .. N-1) — phải dùng XEN KẼ.
+BODY_LAYOUTS: Tuple[LayoutType, ...] = (
+    LayoutType.BIG_STAT_CALLOUT,
+    LayoutType.ASYMMETRIC_GRID,
+    LayoutType.TIMELINE_STEPS,
+    LayoutType.CARDS_ROW,
+)
+
+#: Ánh xạ nâng cấp bố cục đời cũ → bố cục mới tương đương (giữ mạch kể nhất quán).
+LEGACY_LAYOUT_UPGRADE: Dict[LayoutType, LayoutType] = {
+    LayoutType.SPLIT_HERO: LayoutType.ASYMMETRIC_GRID,
+    LayoutType.STAT_GRID: LayoutType.BIG_STAT_CALLOUT,
+    LayoutType.GRID_2X2: LayoutType.CARDS_ROW,
+}
+
+#: Toàn bộ layout thuộc mạch kể chuyện mới (mở bài + thân bài + kết bài).
+NARRATIVE_LAYOUTS: Tuple[LayoutType, ...] = (
+    OPENING_LAYOUTS + BODY_LAYOUTS + CLOSING_LAYOUTS
+)
 
 
 def _coerce_layout_type(value: Any) -> LayoutType:
@@ -206,20 +291,31 @@ class SlideData(BaseModel):
     layout_type: LayoutType = Field(
         default=LayoutType.CARDS_ROW,
         description=(
-            "Kiểu bố cục của slide: "
-            "CARDS_ROW (2-3 thẻ nằm ngang), "
-            "SPLIT_HERO (cột trái hero rộng + cột phải xếp 2 thẻ phụ), "
-            "STAT_GRID (nhấn mạnh số liệu to nổi bật + label ngắn), "
-            "TIMELINE_STEPS (tiến trình 3-4 bước ngang), "
-            "GRID_2X2 (lưới 4 thẻ chia đều 2 hàng x 2 cột). "
-            "Không được để 2 slide liên tiếp có cùng layout_type."
+            "Kiểu bố cục của slide, PHẢI tuân thủ mạch kể 3 phần: "
+            "Slide ĐẦU TIÊN bắt buộc COVER_HERO (tiêu đề siêu lớn + subtitle + badges); "
+            "Slide CUỐI CÙNG bắt buộc CONCLUSION_SUMMARY (3 điểm cốt lõi + call to action); "
+            "các slide THÂN BÀI ở giữa dùng XEN KẼ "
+            "BIG_STAT_CALLOUT (1 số khổng lồ + giải thích), "
+            "ASYMMETRIC_GRID (thẻ hero 60% + 2 thẻ phụ 40%), "
+            "TIMELINE_STEPS (quy trình 3-4 bước), "
+            "CARDS_ROW (2-3 thẻ ngang). "
+            "Tuyệt đối KHÔNG để 2 slide liên tiếp có cùng layout_type."
         ),
     )
     cards: List[ContentCard] = Field(
         ...,
         min_length=1,
         max_length=6,
-        description="Danh sách các thẻ nội dung trong slide (1-6 thẻ). Layout Engine sẽ tự chia lưới theo layout_type.",
+        description=(
+            "Danh sách các thẻ nội dung trong slide (1-6 thẻ). Layout Engine sẽ tự chia lưới "
+            "theo layout_type. Vai trò của thẻ ĐỔI THEO layout: "
+            "COVER_HERO → thẻ 1 là câu hook/subtitle, các thẻ còn lại là badge ngắn (1-3 từ); "
+            "BIG_STAT_CALLOUT → thẻ 1 là con số/từ khóa khổng lồ, các thẻ sau là văn bản giải thích; "
+            "ASYMMETRIC_GRID → thẻ 1 là Hero, thẻ 2-3 là thẻ phụ; "
+            "TIMELINE_STEPS → mỗi thẻ là một bước; "
+            "CARDS_ROW → các thẻ ngang hàng; "
+            "CONCLUSION_SUMMARY → đúng 4 thẻ: 3 thẻ đầu là 3 điểm cốt lõi, thẻ cuối là Call To Action."
+        ),
     )
 
     @field_validator("layout_type", mode="before")
