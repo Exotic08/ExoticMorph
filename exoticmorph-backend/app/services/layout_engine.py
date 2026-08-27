@@ -132,7 +132,9 @@ SUM_FRAME_BOT_IN   = 5.10
 SUM_FRAME_PAD_X_IN = 0.42
 SUM_FRAME_PAD_Y_IN = 0.00
 SUM_ROW_GAP_IN     = 0.16
-SUM_ROW_MAX_H_IN   = 0.72
+SUM_ROW_MAX_H_IN   = 0.58  # ↓ từ 0.72: khung cũ luôn kịch trần dù chữ chỉ chiếm ~0.4in,
+                           # để lại khoảng trống lớn phía dưới (xem log lỗi "khung to chữ bé").
+                           # 0.58in vẫn đủ cho tiêu đề 1 dòng + mô tả 2 dòng ở cỡ chữ hiện tại.
 SUM_CTA_TOP_IN     = 5.56
 SUM_CTA_H_IN       = 0.80
 SUM_ROW_TITLE_PT   = 14
